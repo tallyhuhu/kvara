@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { Bot, Check, Send, X } from "lucide-react";
+import { Bot, Send } from "lucide-react";
 import { sendVeniceMessage, type VeniceMessage } from "../lib/veniceClient";
 import type { PaymentRecord, RentCommand, RentGroup } from "../lib/groupStorage";
 
@@ -14,7 +14,6 @@ export function VeniceChat({ group, history, onCommands }: Props) {
     { role: "assistant", content: "Household agent online." }
   ]);
   const [input, setInput] = useState("");
-  const [pendingCommands, setPendingCommands] = useState<RentCommand[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,7 +29,9 @@ export function VeniceChat({ group, history, onCommands }: Props) {
 
     try {
       const response = await sendVeniceMessage({ message, group, history });
-      setPendingCommands(response.commands);
+      if (response.commands.length > 0) {
+        onCommands(response.commands);
+      }
       setMessages((current) => [...current, { role: "assistant", content: response.message }]);
     } catch (cause) {
       const errorMessage = cause instanceof Error ? cause.message : "Venice request failed";
@@ -39,11 +40,6 @@ export function VeniceChat({ group, history, onCommands }: Props) {
     } finally {
       setLoading(false);
     }
-  }
-
-  function applyPendingCommands() {
-    onCommands(pendingCommands);
-    setPendingCommands([]);
   }
 
   return (
@@ -72,37 +68,13 @@ export function VeniceChat({ group, history, onCommands }: Props) {
         {loading ? <div className="bg-white px-3 py-2 text-sm text-stone-500">Thinking</div> : null}
       </div>
 
-      {pendingCommands.length > 0 ? (
-        <div className="border-t border-stone-300 bg-[#ebe3d3] px-4 py-3">
-          <p className="text-sm font-semibold text-stone-950">{commandSummary(pendingCommands)}</p>
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              onClick={applyPendingCommands}
-              className="inline-flex h-9 items-center gap-2 bg-emerald-950 px-3 text-sm font-semibold text-white transition hover:bg-emerald-900"
-            >
-              <Check size={15} />
-              Apply
-            </button>
-            <button
-              type="button"
-              onClick={() => setPendingCommands([])}
-              className="inline-flex h-9 items-center gap-2 border border-stone-400 px-3 text-sm font-semibold text-stone-700 transition hover:bg-white"
-            >
-              <X size={15} />
-              Dismiss
-            </button>
-          </div>
-        </div>
-      ) : null}
-
       {error ? <div className="border-t border-rose-100 bg-rose-50 px-4 py-2 text-xs text-rose-700">{error}</div> : null}
 
       <form onSubmit={handleSubmit} className="flex gap-2 border-t border-stone-300 p-3">
         <input
           value={input}
           onChange={(event) => setInput(event.target.value)}
-          placeholder="Вася уехал на 2 недели, пересчитай"
+          placeholder="Maya is away for two weeks, update the split"
           className="min-w-0 flex-1 border border-stone-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-emerald-800 focus:ring-2 focus:ring-emerald-100"
         />
         <button
@@ -117,16 +89,4 @@ export function VeniceChat({ group, history, onCommands }: Props) {
       </form>
     </section>
   );
-}
-
-function commandSummary(commands: RentCommand[]): string {
-  const splitCommands = commands.filter((command) => command.type === "set_splits").length;
-  const addCommands = commands.filter((command) => command.type === "add_roommate").length;
-  const removeCommands = commands.filter((command) => command.type === "remove_roommate").length;
-  const parts = [
-    splitCommands ? `${splitCommands} split update` : "",
-    addCommands ? `${addCommands} add` : "",
-    removeCommands ? `${removeCommands} remove` : ""
-  ].filter(Boolean);
-  return parts.length > 0 ? `Pending: ${parts.join(", ")}` : "Pending update";
 }

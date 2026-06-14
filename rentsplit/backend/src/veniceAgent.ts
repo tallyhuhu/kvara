@@ -41,7 +41,7 @@ const VENICE_MODEL = process.env.VENICE_MODEL ?? "llama-3.3-70b";
 
 const SYSTEM_PROMPT = `You are Kvara, an autonomous rent agent for shared apartments.
 You receive a rent group, payment history, and one user message.
-Return compact JSON only:
+Return compact JSON only. Never include markdown or commentary outside JSON:
 {
   "message": "human readable answer",
   "commands": [
@@ -51,10 +51,16 @@ Return compact JSON only:
   ]
 }
 Rules:
+- Act autonomously only when the user gave enough information.
+- If a rent change request is incomplete, return no commands and ask exactly one short clarifying question.
+- For temporary absence or proration, you need the roommate identity and either duration or exact dates.
+- When enough absence details are present, prorate the absent roommate over a 30 day month and redistribute the difference across the other roommates.
 - Preserve total monthly rent when changing splits.
 - Use decimal USDC strings with two decimals.
 - Do not invent wallet addresses.
-- If the user only asks a question, return an empty commands array.`;
+- Match roommates by name from the provided group only. If the name is ambiguous or missing, ask a clarifying question.
+- If the user only asks a question, return an empty commands array.
+- Your message should say what changed, or what information is missing.`;
 
 export async function runVeniceAgent(input: {
   message: string;
@@ -62,97 +68,49 @@ export async function runVeniceAgent(input: {
   history: PaymentRecord[];
 }): Promise<VeniceAgentResult> {
   if (!process.env.VENICE_API_KEY) {
-    return localAgent(input);
+    throw new Error("Venice API key is not configured.");
   }
+
+  const response = await fetch(`${VENICE_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.VENICE_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: VENICE_MODEL,
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: JSON.stringify({
+            message: input.message,
+            group: input.group,
+            paymentHistory: input.history
+          })
+        }
+      ]
+    })
+  });
+
+  const json = (await response.json().catch(() => ({}))) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    error?: { message?: string };
+  };
+  if (!response.ok) {
+    const message = json.error?.message ?? `Venice HTTP ${response.status}`;
+    throw new Error(`Venice request failed (${response.status}): ${message}`);
+  }
+
+  const content = json.choices?.[0]?.message?.content;
+  if (!content) throw new Error("Venice returned an empty response.");
 
   try {
-    const response = await fetch(`${VENICE_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.VENICE_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: VENICE_MODEL,
-        temperature: 0.2,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: JSON.stringify({
-              message: input.message,
-              group: input.group,
-              paymentHistory: input.history
-            })
-          }
-        ]
-      })
-    });
-
-    const json = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-      error?: { message?: string };
-    };
-    if (!response.ok) throw new Error(json.error?.message ?? `Venice HTTP ${response.status}`);
-
-    const content = json.choices?.[0]?.message?.content;
-    if (!content) throw new Error("Venice returned an empty response.");
     return sanitizeAgentResult(JSON.parse(stripJsonFence(content)));
-  } catch (cause) {
-    const fallback = localAgent(input);
-    return {
-      message: `${fallback.message} Venice fallback: ${cause instanceof Error ? cause.message : "request failed"}`,
-      commands: fallback.commands
-    };
+  } catch {
+    throw new Error("Venice returned an invalid agent command.");
   }
-}
-
-function localAgent(input: { message: string; group: RentGroup; history: PaymentRecord[] }): VeniceAgentResult {
-  const lower = input.message.toLowerCase();
-  if (/(total|month|сколько|месяц|итого)/i.test(input.message)) {
-    const now = new Date();
-    const total = input.history
-      .filter((record) => record.status === "confirmed")
-      .filter((record) => {
-        const date = new Date(record.date);
-        return date.getUTCFullYear() === now.getUTCFullYear() && date.getUTCMonth() === now.getUTCMonth();
-      })
-      .reduce((sum, record) => sum + Number(record.amount || 0), 0);
-    return { message: `Confirmed this month: ${total.toFixed(2)} USDC.`, commands: [] };
-  }
-
-  const awayRoommate = input.group.roommates.find((roommate) => lower.includes(roommate.name.toLowerCase()));
-  const weeks = input.message.match(/(\d+)\s*(?:week|weeks|недел|нед)/i);
-  const days = input.message.match(/(\d+)\s*(?:day|days|день|дня|дней|дн)/i);
-
-  if (awayRoommate && (weeks || days)) {
-    const awayDays = weeks ? Number(weeks[1]) * 7 : Number(days?.[1] ?? 0);
-    const presentDays = Math.max(0, Math.min(30, 30 - awayDays));
-    const originalShare = Number(awayRoommate.share);
-    const adjustedShare = roundMoney((originalShare * presentDays) / 30);
-    const remainder = roundMoney(originalShare - adjustedShare);
-    const others = input.group.roommates.filter((roommate) => roommate.id !== awayRoommate.id);
-    const perOther = others.length > 0 ? roundMoney(remainder / others.length) : 0;
-    const splits = input.group.roommates.map((roommate) => ({
-      roommateId: roommate.id,
-      share:
-        roommate.id === awayRoommate.id
-          ? adjustedShare.toFixed(2)
-          : roundMoney(Number(roommate.share) + perOther).toFixed(2)
-    }));
-
-    return {
-      message: `${awayRoommate.name} prorated for ${awayDays} away days. Updated split keeps total rent at ${Number(
-        input.group.totalRent
-      ).toFixed(2)} USDC.`,
-      commands: [{ type: "set_splits", splits, reason: "Prorated temporary absence" }]
-    };
-  }
-
-  return {
-    message: "I can rebalance splits, summarize payment history, and prepare roommate changes.",
-    commands: []
-  };
 }
 
 function sanitizeAgentResult(value: unknown): VeniceAgentResult {
@@ -172,8 +130,4 @@ function isCommand(command: unknown): command is RentCommand {
 
 function stripJsonFence(content: string): string {
   return content.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-}
-
-function roundMoney(value: number): number {
-  return Math.round(value * 100) / 100;
 }

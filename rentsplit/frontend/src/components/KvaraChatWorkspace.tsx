@@ -3,7 +3,6 @@ import {
   ArrowUpRight,
   Bot,
   CalendarClock,
-  Check,
   Copy,
   DoorOpen,
   Loader2,
@@ -118,7 +117,6 @@ export function KvaraChatWorkspace({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
-  const [pendingCommands, setPendingCommands] = useState<RentCommand[]>([]);
   const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
   const [agentRunning, setAgentRunning] = useState(false);
   const [runningNow, setRunningNow] = useState(false);
@@ -335,12 +333,14 @@ export function KvaraChatWorkspace({
   async function runAgentDemo() {
     if (!group) return;
     setRunningNow(true);
+    const startedAt = Date.now();
+    const existingPaymentIds = new Set(history.map((record) => record.id));
     try {
       const response = await runAgentNow(group);
       onPaymentsUpdated(response.payments);
       setAgentEvents(response.events);
       setAgentRunning(response.running);
-      pushAssistant("I ran the rent agent now for the demo. Payment status is updated below.");
+      pushAssistant(summarizeAgentRun(group, response.payments, response.events, existingPaymentIds, startedAt));
     } catch (cause) {
       pushAssistant(cause instanceof Error ? cause.message : "Agent run failed.");
     } finally {
@@ -377,19 +377,15 @@ export function KvaraChatWorkspace({
     setAsking(true);
     try {
       const response = await sendVeniceMessage({ message, group, history });
-      setPendingCommands(response.commands);
+      if (response.commands.length > 0) {
+        onCommands(response.commands);
+      }
       pushAssistant(response.message);
     } catch (cause) {
       pushAssistant(cause instanceof Error ? cause.message : "Kvara agent request failed.");
     } finally {
       setAsking(false);
     }
-  }
-
-  function applyPendingCommands() {
-    onCommands(pendingCommands);
-    setPendingCommands([]);
-    pushAssistant("Applied. The rent split is updated.");
   }
 
   async function copyInvite(roommate: Roommate) {
@@ -526,29 +522,6 @@ export function KvaraChatWorkspace({
                 )
               )}
 
-              {pendingCommands.length > 0 ? (
-                <ActionBubble>
-                  <p className="text-sm font-semibold text-stone-950">{commandSummary(pendingCommands)}</p>
-                  <div className="mt-3 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={applyPendingCommands}
-                      className="inline-flex h-9 items-center gap-2 bg-emerald-950 px-3 text-sm font-semibold text-white transition hover:bg-emerald-900"
-                    >
-                      <Check size={15} />
-                      Apply
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPendingCommands([])}
-                      className="inline-flex h-9 items-center gap-2 border border-stone-400 px-3 text-sm font-semibold text-stone-700 transition hover:bg-white"
-                    >
-                      <X size={15} />
-                      Dismiss
-                    </button>
-                  </div>
-                </ActionBubble>
-              ) : null}
             </div>
 
             <form onSubmit={askKvara} className="flex gap-2 border-t border-stone-300 p-3">
@@ -1051,6 +1024,66 @@ function humanPaymentStatus(status: PaymentRecord["status"]): string {
   return "needs attention";
 }
 
+function summarizeAgentRun(
+  group: RentGroup,
+  payments: PaymentRecord[],
+  events: AgentEvent[],
+  existingPaymentIds: Set<string>,
+  startedAt: number
+): string {
+  const runPayments = payments
+    .filter((payment) => payment.groupId === group.id)
+    .filter((payment) => !existingPaymentIds.has(payment.id))
+    .sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+
+  if (runPayments.length === 0) {
+    const recentEvent = events.find((event) => Date.parse(event.createdAt) >= startedAt - 2000);
+    return recentEvent
+      ? `I checked rent day. ${recentEvent.message}.`
+      : "I checked rent day, but no new payment records were created.";
+  }
+
+  const submitted = runPayments.filter((payment) => payment.status === "submitted").length;
+  const pending = runPayments.filter((payment) => payment.status === "pending").length;
+  const confirmed = runPayments.filter((payment) => payment.status === "confirmed").length;
+  const blocked = runPayments.filter((payment) => payment.status === "failed" || payment.status === "rejected");
+  const live = submitted + pending + confirmed;
+
+  if (live > 0) {
+    const parts = [
+      submitted ? `${submitted} submitted to 1Shot` : "",
+      pending ? `${pending} pending` : "",
+      confirmed ? `${confirmed} confirmed` : ""
+    ].filter(Boolean);
+    const blockedText = blocked.length > 0 ? ` ${formatBlockedPayments(blocked)}` : "";
+    return `Rent day started: ${parts.join(", ")}.${blockedText}`;
+  }
+
+  return `I checked rent day, but no payment was submitted. ${formatBlockedPayments(blocked)}`;
+}
+
+function formatBlockedPayments(payments: PaymentRecord[]): string {
+  if (payments.length === 0) return "No roommate payment was ready.";
+  const visible = payments.slice(0, 3).map((payment) => {
+    const name = payment.roommateName || shortAddress(payment.walletAddress);
+    return `${name}: ${humanPaymentError(payment.error)}`;
+  });
+  const rest = payments.length > visible.length ? `; ${payments.length - visible.length} more blocked` : "";
+  return `Blocked: ${visible.join("; ")}${rest}.`;
+}
+
+function humanPaymentError(error: string | undefined): string {
+  if (!error) return "needs attention";
+  const lower = error.toLowerCase();
+  if (lower.includes("permission is not active")) return "permission is not active";
+  if (lower.includes("permission is expired")) return "permission expired";
+  if (lower.includes("fee buffer")) return "permission buffer is too small";
+  if (lower.includes("insufficient") || lower.includes("balance") || lower.includes("revert")) {
+    return "wallet likely needs USDC on Base";
+  }
+  return error;
+}
+
 function parseResidentRows(
   residents: SetupResident[],
   account?: `0x${string}`
@@ -1177,18 +1210,6 @@ function daysInMonth(year: number, month: number): number {
 function derivePropertyName(address: string): string {
   const firstPart = address.trim().split(",")[0]?.trim();
   return firstPart || "New apartment";
-}
-
-function commandSummary(commands: RentCommand[]): string {
-  const splitCommands = commands.filter((command) => command.type === "set_splits").length;
-  const addCommands = commands.filter((command) => command.type === "add_roommate").length;
-  const removeCommands = commands.filter((command) => command.type === "remove_roommate").length;
-  const parts = [
-    splitCommands ? `${splitCommands} split update` : "",
-    addCommands ? `${addCommands} add` : "",
-    removeCommands ? `${removeCommands} remove` : ""
-  ].filter(Boolean);
-  return parts.length > 0 ? `Pending: ${parts.join(", ")}` : "Pending update";
 }
 
 function sameAddress(a: string, b: string): boolean {
