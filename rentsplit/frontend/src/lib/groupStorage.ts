@@ -45,6 +45,7 @@ export type Roommate = {
 
 export type RentGroup = {
   id: string;
+  adminWalletAddress?: `0x${string}`;
   propertyName: string;
   propertyAddress: string;
   landlordAddress: `0x${string}`;
@@ -115,6 +116,20 @@ export function readGroups(): RentGroup[] {
 
 export function saveGroups(groups: RentGroup[]): void {
   localStorage.setItem(GROUPS_KEY, JSON.stringify(groups));
+}
+
+export function deleteGroupLocal(groupId: string): RentGroup | null {
+  const groups = readGroups();
+  const deleted = groups.find((group) => group.id === groupId) ?? null;
+  const nextGroups = groups.filter((group) => group.id !== groupId);
+  saveGroups(nextGroups);
+
+  if (getActiveGroupId() === groupId) {
+    if (nextGroups[0]) setActiveGroupId(nextGroups[0].id);
+    else localStorage.removeItem(ACTIVE_GROUP_KEY);
+  }
+
+  return deleted;
 }
 
 export function upsertGroup(group: RentGroup): RentGroup {

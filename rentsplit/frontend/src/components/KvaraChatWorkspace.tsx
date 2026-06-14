@@ -5,6 +5,7 @@ import {
   CalendarClock,
   Check,
   Copy,
+  DoorOpen,
   Loader2,
   Play,
   Send,
@@ -31,6 +32,7 @@ import {
 } from "../lib/groupStorage";
 
 type CreateGroupInput = {
+  adminWalletAddress?: `0x${string}`;
   propertyName: string;
   propertyAddress: string;
   landlordAddress: `0x${string}`;
@@ -63,6 +65,7 @@ type Props = {
   stats: { granted: number; total: number; monthlyTotal: number };
   onCreate: (input: CreateGroupInput) => RentGroup;
   onPermissionGranted: (roommateId: string, permission: PermissionGrant) => void;
+  onDeleteGroup: (groupId: string) => RentGroup | null;
   onPaymentsUpdated: (records: PaymentRecord[]) => void;
   onCommands: (commands: RentCommand[]) => void;
 };
@@ -77,6 +80,7 @@ export function KvaraChatWorkspace({
   stats,
   onCreate,
   onPermissionGranted,
+  onDeleteGroup,
   onPaymentsUpdated,
   onCommands
 }: Props) {
@@ -104,6 +108,9 @@ export function KvaraChatWorkspace({
     return group.roommates.find((roommate) => sameAddress(roommate.walletAddress, account)) ?? null;
   }, [account, group]);
   const visibleGroup = account || isInvite ? group : null;
+  const canManageGroup = Boolean(
+    account && group && !isInvite && (!group.adminWalletAddress || sameAddress(group.adminWalletAddress, account))
+  );
 
   const inviteWalletMatches = Boolean(
     !inviteRoommate || !account || sameAddress(inviteRoommate.walletAddress, account)
@@ -170,13 +177,6 @@ export function KvaraChatWorkspace({
       const accounts = (await ethereum.request({ method: "eth_requestAccounts" })) as `0x${string}`[];
       if (!accounts[0]) throw new Error("No wallet account returned.");
       setAccount(accounts[0]);
-      pushAssistant(
-        isInvite
-          ? "Wallet connected. I found your apartment invitation."
-          : group
-            ? "Wallet connected. I found a Kvara apartment on this device."
-            : "Wallet connected. I do not see a Kvara apartment yet. Let's create one."
-      );
     } catch (cause) {
       setConnectError(cause instanceof Error ? cause.message : "Could not connect wallet.");
     }
@@ -187,7 +187,8 @@ export function KvaraChatWorkspace({
     setSetupError(null);
 
     try {
-      const roommates = parseResidents(setupDraft.residents);
+      if (!account) throw new Error("Connect MetaMask first.");
+      const roommates = ensureCurrentResident(parseResidents(setupDraft.residents), account);
       if (roommates.length === 0) throw new Error("Add at least one resident wallet.");
       const propertyAddress = setupDraft.propertyAddress.trim();
       if (!propertyAddress) throw new Error("Add the apartment address.");
@@ -195,6 +196,7 @@ export function KvaraChatWorkspace({
       if (!Number(totalRent) || Number(totalRent) <= 0) throw new Error("Add the monthly rent.");
 
       const created = onCreate({
+        adminWalletAddress: account,
         propertyName: derivePropertyName(propertyAddress),
         propertyAddress,
         landlordAddress: normalizeAddress(setupDraft.landlordAddress),
@@ -206,10 +208,13 @@ export function KvaraChatWorkspace({
         roommates
       });
 
-      pushUser("Create apartment");
-      pushAssistant(
-        `${created.propertyName} is ready. I prepared invite links and will ask each resident for a bounded permission.`
-      );
+      setMessages([
+        {
+          id: createMessageId("assistant"),
+          role: "assistant",
+          text: `${created.propertyName} is ready. I prepared invite links and will ask each resident for a bounded permission.`
+        }
+      ]);
     } catch (cause) {
       setSetupError(cause instanceof Error ? cause.message : "Could not create apartment.");
     }
@@ -236,6 +241,20 @@ export function KvaraChatWorkspace({
     } finally {
       setRunningNow(false);
     }
+  }
+
+  function endLease() {
+    if (!group || !canManageGroup) return;
+    const name = group.propertyName;
+    const deleted = onDeleteGroup(group.id);
+    if (!deleted) return;
+    setMessages([
+      {
+        id: createMessageId("assistant"),
+        role: "assistant",
+        text: `${name} is closed. Kvara will not run this lease again.`
+      }
+    ]);
   }
 
   async function askKvara(event: FormEvent<HTMLFormElement>) {
@@ -309,7 +328,11 @@ export function KvaraChatWorkspace({
                   : isInvite
                     ? `You were invited to ${group?.propertyName ?? "an apartment"}. I can request the bounded permission when you are ready.`
                     : group
-                      ? `I found ${group.propertyName}. You can ask me to recalculate rent, copy invites, or run the demo rent day.`
+                      ? canManageGroup
+                        ? `I found ${group.propertyName}. You can ask me to recalculate rent, copy invites, or run the demo rent day.`
+                        : connectedRoommate
+                          ? `I found ${group.propertyName}. I can request your bounded permission for this home.`
+                          : `I found ${group.propertyName}. You can ask me rent questions from this wallet.`
                       : "This wallet has no Kvara apartment yet. Tell me the basics and I will prepare the rent room."}
               </AssistantBubble>
 
@@ -348,10 +371,11 @@ export function KvaraChatWorkspace({
                 />
               ) : null}
 
-              {account && group ? (
+              {account && group && !isInvite ? (
                 <ApartmentActionsBubble
                   group={group}
                   connectedRoommate={connectedRoommate}
+                  canManageGroup={canManageGroup}
                   permissionLoading={permissionLoading}
                   permissionDetail={detail}
                   permissionError={permissionError}
@@ -423,6 +447,8 @@ export function KvaraChatWorkspace({
             stats={stats}
             history={history}
             events={agentEvents}
+            canManageGroup={canManageGroup}
+            onEndLease={endLease}
           />
         </section>
       </div>
@@ -566,6 +592,7 @@ function ApartmentActionsBubble({
   permissionLoading,
   permissionDetail,
   permissionError,
+  canManageGroup,
   running,
   copiedInviteId,
   onGrant,
@@ -574,6 +601,7 @@ function ApartmentActionsBubble({
 }: {
   group: RentGroup;
   connectedRoommate: Roommate | null;
+  canManageGroup: boolean;
   permissionLoading: boolean;
   permissionDetail?: string;
   permissionError?: string;
@@ -584,6 +612,8 @@ function ApartmentActionsBubble({
   onRunAgent: () => void;
 }) {
   const needsPermission = connectedRoommate && permissionStatus(connectedRoommate) !== "granted";
+  if (!needsPermission && !canManageGroup) return null;
+
   return (
     <ActionBubble>
       <div className="flex flex-wrap gap-2">
@@ -598,33 +628,37 @@ function ApartmentActionsBubble({
             {permissionLoading ? permissionDetail ?? "Opening MetaMask" : "Grant my permission"}
           </button>
         ) : null}
-        <button
-          type="button"
-          onClick={onRunAgent}
-          disabled={running}
-          className="inline-flex h-10 items-center gap-2 border border-stone-400 bg-white px-3 text-sm font-semibold text-stone-800 transition hover:bg-stone-50 disabled:text-stone-400"
-        >
-          {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-          Demo rent day
-        </button>
+        {canManageGroup ? (
+          <button
+            type="button"
+            onClick={onRunAgent}
+            disabled={running}
+            className="inline-flex h-10 items-center gap-2 border border-stone-400 bg-white px-3 text-sm font-semibold text-stone-800 transition hover:bg-stone-50 disabled:text-stone-400"
+          >
+            {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+            Demo rent day
+          </button>
+        ) : null}
       </div>
       {permissionError ? <p className="mt-3 text-sm text-rose-700">{permissionError}</p> : null}
-      <div className="mt-4 divide-y divide-stone-300 border border-stone-300 bg-white">
-        {group.roommates.map((roommate) => (
-          <button
-            key={roommate.id}
-            type="button"
-            onClick={() => onCopyInvite(roommate)}
-            className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition hover:bg-stone-50"
-          >
-            <span className="min-w-0 truncate text-stone-700">{roommate.name}</span>
-            <span className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-800">
-              {copiedInviteId === roommate.id ? "Copied" : "Invite"}
-              <Copy size={14} />
-            </span>
-          </button>
-        ))}
-      </div>
+      {canManageGroup ? (
+        <div className="mt-4 divide-y divide-stone-300 border border-stone-300 bg-white">
+          {group.roommates.map((roommate) => (
+            <button
+              key={roommate.id}
+              type="button"
+              onClick={() => onCopyInvite(roommate)}
+              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition hover:bg-stone-50"
+            >
+              <span className="min-w-0 truncate text-stone-700">{roommate.name}</span>
+              <span className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-800">
+                {copiedInviteId === roommate.id ? "Copied" : "Invite"}
+                <Copy size={14} />
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </ActionBubble>
   );
 }
@@ -635,7 +669,9 @@ function ApartmentSnapshot({
   setupDraft,
   stats,
   history,
-  events
+  events,
+  canManageGroup,
+  onEndLease
 }: {
   group: RentGroup | null;
   inviteRoommate: Roommate | null;
@@ -643,6 +679,8 @@ function ApartmentSnapshot({
   stats: { granted: number; total: number; monthlyTotal: number };
   history: PaymentRecord[];
   events: AgentEvent[];
+  canManageGroup: boolean;
+  onEndLease: () => void;
 }) {
   const hasDraft = Boolean(
     setupDraft.propertyAddress.trim() || setupDraft.landlordAddress.trim() || setupDraft.residents.trim()
@@ -696,6 +734,19 @@ function ApartmentSnapshot({
           <p className="text-sm leading-relaxed text-stone-500">Nothing has happened yet.</p>
         )}
       </div>
+
+      {group && canManageGroup ? (
+        <div className="border-t border-stone-300 p-4">
+          <button
+            type="button"
+            onClick={onEndLease}
+            className="inline-flex h-10 w-full items-center justify-center gap-2 border border-stone-400 bg-white px-3 text-sm font-semibold text-stone-700 transition hover:bg-stone-50 active:translate-y-[1px]"
+          >
+            <DoorOpen size={16} />
+            End lease
+          </button>
+        </div>
+      ) : null}
     </aside>
   );
 }
@@ -756,6 +807,14 @@ function parseResidentsSafe(value: string): Array<{ name: string; walletAddress:
   } catch {
     return [];
   }
+}
+
+function ensureCurrentResident(
+  roommates: Array<{ name: string; walletAddress: `0x${string}` }>,
+  account: `0x${string}`
+): Array<{ name: string; walletAddress: `0x${string}` }> {
+  if (roommates.some((roommate) => sameAddress(roommate.walletAddress, account))) return roommates;
+  return [{ name: "Me", walletAddress: account }, ...roommates];
 }
 
 function derivePropertyName(address: string): string {

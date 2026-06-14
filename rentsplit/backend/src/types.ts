@@ -31,6 +31,7 @@ export type Roommate = {
 
 export type RentGroup = {
   id: string;
+  adminWalletAddress?: `0x${string}`;
   propertyName?: string;
   propertyAddress?: string;
   landlordAddress: `0x${string}`;

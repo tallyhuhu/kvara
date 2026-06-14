@@ -3,7 +3,16 @@ import cors from "cors";
 import express from "express";
 import { collectGroupRent, getRelayerCapabilities, refreshTaskStatuses } from "./agent.js";
 import { getAgentState, runAgentNow, scheduleGroup } from "./scheduler.js";
-import { getGroup, initStore, listGroups, listPayments, saveGroup, savePaymentRecords, storeMode } from "./store.js";
+import {
+  deleteGroup,
+  getGroup,
+  initStore,
+  listGroups,
+  listPayments,
+  saveGroup,
+  savePaymentRecords,
+  storeMode
+} from "./store.js";
 import { runVeniceAgent } from "./veniceAgent.js";
 
 const app = express();
@@ -53,6 +62,15 @@ app.post("/api/groups", async (req, res, next) => {
       await scheduleGroup(group);
     }
     res.json({ group });
+  } catch (cause) {
+    next(cause);
+  }
+});
+
+app.delete("/api/groups/:groupId", async (req, res, next) => {
+  try {
+    await deleteGroup(req.params.groupId);
+    res.json({ ok: true });
   } catch (cause) {
     next(cause);
   }

@@ -88,6 +88,13 @@ export async function saveGroup(group: RentGroup): Promise<RentGroup> {
   return next;
 }
 
+export async function deleteGroup(groupId: string): Promise<boolean> {
+  if (!pool) return memory.groups.delete(groupId);
+  await initStore();
+  const result = await pool.query("delete from rent_groups where id = $1", [groupId]);
+  return Number(result.rowCount ?? 0) > 0;
+}
+
 export async function listPayments(groupId: string): Promise<PaymentRecord[]> {
   if (!pool) {
     return Array.from(memory.payments.values())

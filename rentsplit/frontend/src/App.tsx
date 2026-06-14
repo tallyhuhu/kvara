@@ -11,6 +11,7 @@ export default function App() {
     activeGroup,
     createGroup,
     updateRoommatePermission,
+    deleteGroup,
     inviteRoommate,
     isInvite,
     history,
@@ -46,6 +47,7 @@ export default function App() {
         stats={stats}
         onCreate={createGroup}
         onPermissionGranted={updateRoommatePermission}
+        onDeleteGroup={deleteGroup}
         onPaymentsUpdated={mergePaymentRecords}
         onCommands={applyCommands}
       />
@@ -65,6 +67,7 @@ export default function App() {
       stats={stats}
       onCreate={createGroup}
       onPermissionGranted={updateRoommatePermission}
+      onDeleteGroup={deleteGroup}
       onPaymentsUpdated={mergePaymentRecords}
       onCommands={applyCommands}
     />

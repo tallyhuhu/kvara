@@ -160,7 +160,7 @@ async function submitRoommatePayment(input: {
     }
 
     const shareAtoms = parseUnits(roommate.share, decimals);
-    const mockFee = maxBigInt(BigInt(feeData.minFee), parseUnits(FEE_BUFFER_USDC, decimals));
+    const mockFee = maxBigInt(parseRelayerTokenAmount(feeData.minFee, decimals), parseUnits(FEE_BUFFER_USDC, decimals));
     let params = buildSendParams({
       permission,
       landlordAddress: group.landlordAddress,
@@ -174,7 +174,7 @@ async function submitRoommatePayment(input: {
     let estimate = await relayerRpc<EstimateResult>("relayer_estimate7710Transaction", params);
     if (!estimate.success) throw new Error(estimate.error ?? "Relayer estimate failed.");
 
-    const requiredFee = BigInt(estimate.requiredPaymentAmount ?? mockFee.toString());
+    const requiredFee = parseRelayerTokenAmount(estimate.requiredPaymentAmount ?? mockFee.toString(), decimals);
     assertPermissionCoversFee(permission, shareAtoms, requiredFee);
 
     if (requiredFee !== mockFee) {
@@ -299,4 +299,15 @@ async function relayerRpc<T>(method: string, params: unknown): Promise<T> {
 
 function maxBigInt(a: bigint, b: bigint): bigint {
   return a > b ? a : b;
+}
+
+function parseRelayerTokenAmount(value: string | number | bigint | undefined, decimals: number): bigint {
+  if (value === undefined) return 0n;
+  if (typeof value === "bigint") return value;
+
+  const text = String(value).trim();
+  if (!text) return 0n;
+  if (text.startsWith("0x")) return BigInt(text);
+  if (text.includes(".")) return parseUnits(text, decimals);
+  return BigInt(text);
 }

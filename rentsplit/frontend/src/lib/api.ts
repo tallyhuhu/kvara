@@ -54,6 +54,13 @@ export async function saveGroupRemote(group: RentGroup): Promise<GroupResponse> 
   return postJson<GroupResponse>("/api/groups", { group });
 }
 
+export async function deleteGroupRemote(groupId: string): Promise<{ ok: true }> {
+  const response = await fetch(`${API_URL}/api/groups/${groupId}`, { method: "DELETE" });
+  const json = (await response.json().catch(() => ({}))) as { ok?: true; error?: string };
+  if (!response.ok) throw new Error(json.error ?? `Request failed with ${response.status}`);
+  return { ok: true };
+}
+
 export async function fetchPayments(groupId: string): Promise<CollectResponse> {
   const response = await fetch(`${API_URL}/api/groups/${groupId}/payments`);
   const json = (await response.json().catch(() => ({}))) as CollectResponse & { error?: string };

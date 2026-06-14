@@ -103,7 +103,7 @@ export function useMetaMaskPermissions() {
         const shareAtoms = parseUnits(roommate.share, tokenDecimals);
         const bufferPercent = group.permissionBufferPercent ?? DEFAULT_PERMISSION_BUFFER_PERCENT;
         const adjustmentBufferAtoms = (shareAtoms * BigInt(Math.max(0, Math.round(bufferPercent)))) / 100n;
-        const minFeeAtoms = BigInt(feeData.minFee);
+        const minFeeAtoms = parseRelayerTokenAmount(feeData.minFee, tokenDecimals);
         const feeBufferAtoms = maxBigInt(parseUnits(FEE_BUFFER_USDC, tokenDecimals), minFeeAtoms);
         const allowanceAtoms = shareAtoms + adjustmentBufferAtoms + feeBufferAtoms;
         const relayerTarget = feeData.targetAddress ?? chainCaps.targetAddress;
@@ -255,4 +255,15 @@ function toRelayerJson(value: unknown): unknown {
 
 function maxBigInt(a: bigint, b: bigint): bigint {
   return a > b ? a : b;
+}
+
+function parseRelayerTokenAmount(value: string | number | bigint | undefined, decimals: number): bigint {
+  if (value === undefined) return 0n;
+  if (typeof value === "bigint") return value;
+
+  const text = String(value).trim();
+  if (!text) return 0n;
+  if (text.startsWith("0x")) return BigInt(text);
+  if (text.includes(".")) return parseUnits(text, decimals);
+  return BigInt(text);
 }

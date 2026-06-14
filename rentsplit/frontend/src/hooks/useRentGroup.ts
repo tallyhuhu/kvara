@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   applyRentCommands,
   createId,
+  deleteGroupLocal,
   demoRunInMinutes,
   getActiveGroupId,
   getInviteParams,
@@ -18,9 +19,10 @@ import {
   type RentGroup,
   type Roommate
 } from "../lib/groupStorage";
-import { fetchGroup, fetchGroups, fetchPayments, saveGroupRemote } from "../lib/api";
+import { deleteGroupRemote, fetchGroup, fetchGroups, fetchPayments, saveGroupRemote } from "../lib/api";
 
 type CreateGroupInput = {
+  adminWalletAddress?: `0x${string}`;
   propertyName: string;
   propertyAddress: string;
   landlordAddress: `0x${string}`;
@@ -100,6 +102,7 @@ export function useRentGroup() {
     const defaultSplits = splitEqual(input.totalRent, input.roommates.length);
     const group: RentGroup = {
       id: createId("group"),
+      adminWalletAddress: input.adminWalletAddress,
       propertyName: input.propertyName.trim() || "Apartment",
       propertyAddress: input.propertyAddress.trim(),
       landlordAddress: input.landlordAddress,
@@ -184,6 +187,24 @@ export function useRentGroup() {
     [activeGroup, updateGroup]
   );
 
+  const deleteGroup = useCallback(
+    (groupId: string) => {
+      const deleted = deleteGroupLocal(groupId);
+      const refreshedGroups = readGroups();
+      setGroups(refreshedGroups);
+      const nextId = getActiveGroupId() ?? refreshedGroups[0]?.id ?? null;
+      setActiveGroup(nextId);
+      setHistory((current) => {
+        const next = current.filter((record) => record.groupId !== groupId);
+        savePaymentHistory(next);
+        return next;
+      });
+      if (deleted) deleteGroupRemote(groupId).catch(() => undefined);
+      return deleted;
+    },
+    []
+  );
+
   const groupHistory = useMemo(
     () => (activeGroup ? history.filter((record) => record.groupId === activeGroup.id) : []),
     [activeGroup, history]
@@ -209,6 +230,7 @@ export function useRentGroup() {
     createGroup,
     updateGroup,
     updateRoommatePermission,
+    deleteGroup,
     inviteRoommate,
     isInvite: Boolean(inviteRoommateId),
     history: groupHistory,
