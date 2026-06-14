@@ -1,4 +1,4 @@
-import { FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowUpRight,
   Bot,
@@ -9,6 +9,7 @@ import {
   Loader2,
   Play,
   Plus,
+  RefreshCw,
   Send,
   ShieldCheck,
   Trash2,
@@ -84,6 +85,12 @@ type Props = {
 
 const DEFAULT_BUFFER_PERCENT = 30;
 
+type MetaMaskProvider = {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  on?: (event: "accountsChanged" | "chainChanged", handler: (value: unknown) => void) => void;
+  removeListener?: (event: "accountsChanged" | "chainChanged", handler: (value: unknown) => void) => void;
+};
+
 export function KvaraChatWorkspace({
   group,
   inviteRoommate,
@@ -139,6 +146,17 @@ export function KvaraChatWorkspace({
     [history]
   );
 
+  const handleWalletAccount = useCallback(
+    async (nextAccount: `0x${string}`) => {
+      setConnectError(null);
+      setAccount(nextAccount);
+      if (!isInvite) {
+        await onWalletConnected(nextAccount);
+      }
+    },
+    [isInvite, onWalletConnected]
+  );
+
   useEffect(() => {
     if (!account) return;
     setSetupDraft((current) => {
@@ -157,6 +175,36 @@ export function KvaraChatWorkspace({
       };
     });
   }, [account]);
+
+  useEffect(() => {
+    const ethereum = window.ethereum as MetaMaskProvider | undefined;
+    if (!ethereum?.on) return;
+
+    const handleAccountsChanged = (value: unknown) => {
+      const accounts = Array.isArray(value) ? value : [];
+      const nextAccount = typeof accounts[0] === "string" ? (accounts[0] as `0x${string}`) : null;
+      if (!nextAccount) {
+        setAccount(null);
+        setConnectError(null);
+        return;
+      }
+      handleWalletAccount(nextAccount).catch((cause) => {
+        setConnectError(cause instanceof Error ? cause.message : "Could not load this wallet.");
+      });
+    };
+
+    const handleChainChanged = () => {
+      setConnectError(null);
+    };
+
+    ethereum.on("accountsChanged", handleAccountsChanged);
+    ethereum.on("chainChanged", handleChainChanged);
+
+    return () => {
+      ethereum.removeListener?.("accountsChanged", handleAccountsChanged);
+      ethereum.removeListener?.("chainChanged", handleChainChanged);
+    };
+  }, [handleWalletAccount]);
 
   useEffect(() => {
     if (!group) return;
@@ -197,19 +245,44 @@ export function KvaraChatWorkspace({
   async function connectWallet() {
     setConnectError(null);
     try {
-      const ethereum = window.ethereum as
-        | { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> }
-        | undefined;
+      const ethereum = window.ethereum as MetaMaskProvider | undefined;
       if (!ethereum) throw new Error("MetaMask is not available in this browser.");
       const accounts = (await ethereum.request({ method: "eth_requestAccounts" })) as `0x${string}`[];
       if (!accounts[0]) throw new Error("No wallet account returned.");
-      setAccount(accounts[0]);
-      if (!isInvite) {
-        await onWalletConnected(accounts[0]);
-      }
+      await handleWalletAccount(accounts[0]);
     } catch (cause) {
       setConnectError(cause instanceof Error ? cause.message : "Could not connect wallet.");
     }
+  }
+
+  async function switchWallet() {
+    setConnectError(null);
+    try {
+      const ethereum = window.ethereum as MetaMaskProvider | undefined;
+      if (!ethereum) throw new Error("MetaMask is not available in this browser.");
+      try {
+        await ethereum.request({ method: "wallet_requestPermissions", params: [{ eth_accounts: {} }] });
+      } catch (cause) {
+        const error = cause as { code?: number };
+        if (error.code === 4001) throw cause;
+      }
+      const accounts = (await ethereum.request({ method: "eth_requestAccounts" })) as `0x${string}`[];
+      if (!accounts[0]) throw new Error("No wallet account returned.");
+      await handleWalletAccount(accounts[0]);
+    } catch (cause) {
+      setConnectError(cause instanceof Error ? cause.message : "Could not switch wallet.");
+    }
+  }
+
+  async function disconnectWallet() {
+    const ethereum = window.ethereum as MetaMaskProvider | undefined;
+    try {
+      await ethereum?.request({ method: "wallet_revokePermissions", params: [{ eth_accounts: {} }] });
+    } catch {
+      // Some wallets do not expose revocation; local session reset is still useful.
+    }
+    setAccount(null);
+    setConnectError(null);
   }
 
   function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
@@ -345,9 +418,27 @@ export function KvaraChatWorkspace({
             </div>
           </div>
           {account ? (
-            <span className="border border-stone-300 bg-white px-3 py-2 font-mono text-xs text-stone-600">
-              {shortAddress(account)}
-            </span>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <span className="border border-stone-300 bg-white px-3 py-2 font-mono text-xs text-stone-600">
+                {shortAddress(account)}
+              </span>
+              <button
+                type="button"
+                onClick={switchWallet}
+                className="inline-flex h-9 items-center gap-2 border border-stone-300 bg-white px-3 text-xs font-semibold text-stone-700 transition hover:bg-stone-50 active:translate-y-[1px]"
+              >
+                <RefreshCw size={14} />
+                Switch
+              </button>
+              <button
+                type="button"
+                onClick={disconnectWallet}
+                className="inline-flex h-9 items-center gap-2 border border-stone-300 bg-white px-3 text-xs font-semibold text-stone-500 transition hover:bg-stone-50 active:translate-y-[1px]"
+              >
+                <X size={14} />
+                Disconnect
+              </button>
+            </div>
           ) : null}
         </header>
 
@@ -382,6 +473,12 @@ export function KvaraChatWorkspace({
                 </ActionBubble>
               ) : null}
 
+              {account && connectError ? (
+                <ActionBubble>
+                  <p className="text-sm text-rose-700">{connectError}</p>
+                </ActionBubble>
+              ) : null}
+
               {account && isInvite && group && inviteRoommate ? (
                 <InvitePermissionBubble
                   group={group}
@@ -390,6 +487,8 @@ export function KvaraChatWorkspace({
                   loading={permissionLoading}
                   detail={detail}
                   error={permissionError}
+                  connectedWallet={account}
+                  onSwitchWallet={switchWallet}
                   onGrant={() => grantPermission(inviteRoommate)}
                 />
               ) : null}
@@ -681,6 +780,8 @@ function InvitePermissionBubble({
   loading,
   detail,
   error,
+  connectedWallet,
+  onSwitchWallet,
   onGrant
 }: {
   group: RentGroup;
@@ -689,6 +790,8 @@ function InvitePermissionBubble({
   loading: boolean;
   detail?: string;
   error?: string;
+  connectedWallet: `0x${string}` | null;
+  onSwitchWallet: () => void;
   onGrant: () => void;
 }) {
   const status = permissionStatus(roommate);
@@ -699,7 +802,20 @@ function InvitePermissionBubble({
         Your monthly share is {formatUsd(roommate.share)} USDC with a +{group.permissionBufferPercent}% buffer.
       </p>
       {!walletMatches ? (
-        <p className="mt-3 text-sm text-rose-700">Connected wallet must match {shortAddress(roommate.walletAddress)}.</p>
+        <div className="mt-3 border border-rose-200 bg-white px-3 py-3">
+          <p className="text-sm text-rose-700">
+            MetaMask is using {connectedWallet ? shortAddress(connectedWallet) : "another wallet"}. This invite belongs
+            to {` ${shortAddress(roommate.walletAddress)}`}.
+          </p>
+          <button
+            type="button"
+            onClick={onSwitchWallet}
+            className="mt-3 inline-flex h-9 items-center gap-2 border border-stone-400 bg-white px-3 text-xs font-semibold text-stone-800 transition hover:bg-stone-50 active:translate-y-[1px]"
+          >
+            <RefreshCw size={14} />
+            Switch wallet
+          </button>
+        </div>
       ) : null}
       {error ? <p className="mt-3 text-sm text-rose-700">{error}</p> : null}
       <button
@@ -786,7 +902,7 @@ function ApartmentActionsBubble({
                 </span>
               </span>
               <span className="text-xs font-semibold uppercase text-stone-500">
-                {formatUsd(roommate.share)} USDC · {residentPermissionLabel(roommate)}
+                {formatUsd(roommate.share)} USDC - {residentPermissionLabel(roommate)}
               </span>
               <span className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-800">
                 {copiedInviteId === roommate.id ? "Copied" : "Invite"}
