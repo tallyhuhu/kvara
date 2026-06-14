@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import { ArrowUpRight, Bot, Building2, CalendarClock, ChevronDown, ShieldCheck, WalletCards } from "lucide-react";
 import propertyHero from "../assets/property-hero.png";
+import baseLogo from "../assets/brand-logos/base-mark.svg";
+import metamaskLogo from "../assets/brand-logos/metamask-wordmark.svg";
+import oneShotLogo from "../assets/brand-logos/oneshot-wordmark.svg";
+import veniceLogo from "../assets/brand-logos/venice-wordmark.svg";
 
 type Props = {
   onEnterApp: () => void;
@@ -34,10 +38,10 @@ const steps = [
 ];
 
 const brands = [
-  { title: "MetaMask", subtitle: "Smart Accounts Kit", tone: "metamask" },
-  { title: "1Shot", subtitle: "Permissionless Relayer", tone: "oneshot" },
-  { title: "Venice", subtitle: "Private agent reasoning", tone: "venice" },
-  { title: "Base", subtitle: "USDC mainnet payments", tone: "base" }
+  { title: "MetaMask", subtitle: "Smart Accounts Kit", logo: metamaskLogo, logoClass: "h-[46px] w-[106px]" },
+  { title: "1Shot", subtitle: "Permissionless Relayer", logo: oneShotLogo, logoClass: "h-[34px] w-[106px]" },
+  { title: "Venice", subtitle: "Private agent reasoning", logo: veniceLogo, logoClass: "h-[38px] w-[110px]" },
+  { title: "Base", subtitle: "USDC mainnet payments", logo: baseLogo, logoClass: "h-[36px] w-[114px]" }
 ] as const;
 
 export function LandingPage({ onEnterApp }: Props) {
@@ -178,52 +182,17 @@ export function LandingPage({ onEnterApp }: Props) {
 
 function BrandBadge({ brand }: { brand: (typeof brands)[number] }) {
   return (
-    <div className="brand-badge flex items-center gap-3 border border-white/[0.14] bg-white/[0.08] px-4 py-4 backdrop-blur">
-      <BrandMark tone={brand.tone} />
-      <div className="min-w-0">
-        <p className="truncate text-xl font-semibold leading-none text-white">{brand.title}</p>
-        <p className="mt-2 truncate text-xs font-semibold uppercase text-stone-400">{brand.subtitle}</p>
+    <div className="brand-badge flex min-h-[112px] flex-col items-center justify-center border border-white/[0.14] bg-white/[0.075] px-5 py-5 text-center backdrop-blur transition hover:bg-white/[0.11]">
+      <div className="flex h-12 w-full items-center justify-center">
+        <img
+          src={brand.logo}
+          alt={`${brand.title} logo`}
+          className={`${brand.logoClass} object-contain object-center`}
+        />
       </div>
+      <p className="mt-5 max-w-full truncate text-center text-xs font-semibold uppercase text-stone-400">
+        {brand.subtitle}
+      </p>
     </div>
-  );
-}
-
-function BrandMark({ tone }: { tone: (typeof brands)[number]["tone"] }) {
-  if (tone === "metamask") {
-    return (
-      <svg className="h-10 w-10 shrink-0" viewBox="0 0 40 40" aria-hidden="true">
-        <rect width="40" height="40" fill="#f6851b" />
-        <path d="M10 12h20l-4 5 4 6-8 5h-4l-8-5 4-6-4-5Z" fill="#fff2df" />
-        <path d="M14 17h12l-4 5h-4l-4-5Z" fill="#2b2119" opacity=".78" />
-      </svg>
-    );
-  }
-
-  if (tone === "oneshot") {
-    return (
-      <svg className="h-10 w-10 shrink-0" viewBox="0 0 40 40" aria-hidden="true">
-        <rect width="40" height="40" fill="#f7f2e8" />
-        <path d="M15 31V11h-5V7h11v24h-6Z" fill="#061a13" />
-        <path d="M22 11h8v8h-4v-3.2L17.7 24 15 21.3 23.2 13H22v-2Z" fill="#061a13" />
-      </svg>
-    );
-  }
-
-  if (tone === "venice") {
-    return (
-      <svg className="h-10 w-10 shrink-0" viewBox="0 0 40 40" aria-hidden="true">
-        <rect width="40" height="40" fill="#111111" />
-        <path d="M10 10h20L20 31 10 10Z" fill="#f7f2e8" />
-        <path d="M16 14h8l-4 9-4-9Z" fill="#111111" />
-      </svg>
-    );
-  }
-
-  return (
-    <svg className="h-10 w-10 shrink-0" viewBox="0 0 40 40" aria-hidden="true">
-      <rect width="40" height="40" fill="#0052ff" />
-      <circle cx="20" cy="20" r="12" fill="#f7f2e8" />
-      <path d="M20 10a10 10 0 1 1 0 20h-2v-6h2a4 4 0 1 0 0-8h-2v-6h2Z" fill="#0052ff" />
-    </svg>
   );
 }

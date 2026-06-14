@@ -28,6 +28,7 @@ pnpm-debug.log*
 skills-lock.json
 
 # browser test output
+output/
 playwright-report/
 test-results/
 
