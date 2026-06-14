@@ -41,51 +41,55 @@ export function useRentGroup() {
   const [inviteRoommateId, setInviteRoommateId] = useState<string | null>(null);
 
   useEffect(() => {
-    const savedGroups = readGroups();
     const invite = getInviteParams();
 
-    let nextGroups = savedGroups;
-    let nextActiveGroupId = getActiveGroupId() ?? savedGroups[0]?.id ?? null;
+    setInviteRoommateId(invite?.roommateId ?? null);
+    setHistory([]);
 
     if (invite?.payloadGroup) {
-      const imported = upsertGroup(invite.payloadGroup);
-      nextGroups = readGroups();
-      nextActiveGroupId = imported.id;
-    } else if (invite?.groupId) {
-      nextActiveGroupId = invite.groupId;
-      setActiveGroupId(invite.groupId);
+      setGroups([invite.payloadGroup]);
+      setActiveGroup(invite.payloadGroup.id);
+      return;
     }
 
-    setGroups(nextGroups);
-    setActiveGroup(nextActiveGroupId);
-    setInviteRoommateId(invite?.roommateId ?? null);
-    setHistory(readPaymentHistory());
+    if (!invite?.groupId) {
+      setGroups([]);
+      setActiveGroup(null);
+      return;
+    }
+
+    const inviteGroupId = invite.groupId;
+    setActiveGroup(inviteGroupId);
 
     async function hydrateFromBackend() {
       try {
-        if (invite?.groupId) {
-          const { group } = await fetchGroup(invite.groupId);
-          const saved = upsertGroup(group);
-          setGroups(readGroups());
-          setActiveGroup(saved.id);
-          const { payments } = await fetchPayments(saved.id);
-          setHistory(payments);
-          return;
-        }
-
-        const { groups: remoteGroups } = await fetchGroups();
-        if (remoteGroups.length === 0) return;
-        remoteGroups.forEach((group) => upsertGroup(group));
-        const refreshedGroups = readGroups();
-        const nextId = getActiveGroupId() ?? refreshedGroups[0]?.id ?? null;
-        setGroups(refreshedGroups);
-        setActiveGroup(nextId);
+        const { group } = await fetchGroup(inviteGroupId);
+        setGroups([group]);
+        setActiveGroup(group.id);
+        const { payments } = await fetchPayments(group.id);
+        setHistory(payments);
       } catch {
-        // Local cache keeps the demo usable without a backend or DATABASE_URL.
+        setGroups([]);
       }
     }
 
     void hydrateFromBackend();
+  }, []);
+
+  const loadGroupsForWallet = useCallback(async (walletAddress: `0x${string}`) => {
+    try {
+      const { groups: remoteGroups } = await fetchGroups(walletAddress);
+      setGroups(remoteGroups);
+      setActiveGroup(remoteGroups[0]?.id ?? null);
+      setHistory([]);
+      return remoteGroups;
+    } catch {
+      const localGroups = readGroups().filter((group) => groupBelongsToWallet(group, walletAddress));
+      setGroups(localGroups);
+      setActiveGroup(localGroups[0]?.id ?? null);
+      setHistory(readPaymentHistory().filter((record) => localGroups.some((group) => group.id === record.groupId)));
+      return localGroups;
+    }
   }, []);
 
   const activeGroup = useMemo(
@@ -122,7 +126,7 @@ export function useRentGroup() {
     };
 
     const saved = upsertGroup(group);
-    setGroups(readGroups());
+    setGroups((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
     setActiveGroup(saved.id);
     saveGroupRemote(saved).catch(() => undefined);
     return saved;
@@ -130,7 +134,11 @@ export function useRentGroup() {
 
   const updateGroup = useCallback((group: RentGroup) => {
     const saved = upsertGroup(group);
-    setGroups(readGroups());
+    setGroups((current) => {
+      const exists = current.some((item) => item.id === saved.id);
+      if (!exists) return [saved, ...current];
+      return current.map((item) => (item.id === saved.id ? saved : item));
+    });
     setActiveGroup(saved.id);
     saveGroupRemote(saved).catch(() => undefined);
     return saved;
@@ -190,10 +198,11 @@ export function useRentGroup() {
   const deleteGroup = useCallback(
     (groupId: string) => {
       const deleted = deleteGroupLocal(groupId);
-      const refreshedGroups = readGroups();
-      setGroups(refreshedGroups);
-      const nextId = getActiveGroupId() ?? refreshedGroups[0]?.id ?? null;
-      setActiveGroup(nextId);
+      setGroups((current) => {
+        const next = current.filter((group) => group.id !== groupId);
+        setActiveGroup((currentActiveId) => (currentActiveId === groupId ? next[0]?.id ?? null : currentActiveId));
+        return next;
+      });
       setHistory((current) => {
         const next = current.filter((record) => record.groupId !== groupId);
         savePaymentHistory(next);
@@ -231,6 +240,7 @@ export function useRentGroup() {
     updateGroup,
     updateRoommatePermission,
     deleteGroup,
+    loadGroupsForWallet,
     inviteRoommate,
     isInvite: Boolean(inviteRoommateId),
     history: groupHistory,
@@ -240,4 +250,10 @@ export function useRentGroup() {
     applyCommands,
     stats
   };
+}
+
+function groupBelongsToWallet(group: RentGroup, walletAddress: string): boolean {
+  const wallet = walletAddress.toLowerCase();
+  if (group.adminWalletAddress?.toLowerCase() === wallet) return true;
+  return group.roommates.some((roommate) => roommate.walletAddress.toLowerCase() === wallet);
 }

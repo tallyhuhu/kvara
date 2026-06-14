@@ -53,13 +53,21 @@ export function storeMode(): "postgres" | "memory" {
   return pool ? "postgres" : "memory";
 }
 
-export async function listGroups(): Promise<RentGroup[]> {
-  if (!pool) return Array.from(memory.groups.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+export async function listGroups(walletAddress?: string): Promise<RentGroup[]> {
+  if (!pool) {
+    return filterGroupsByWallet(
+      Array.from(memory.groups.values()).sort((a, b) => b.updatedAt - a.updatedAt),
+      walletAddress
+    );
+  }
   await initStore();
   const result = await pool.query<{ payload: RentGroup }>(
     "select payload from rent_groups order by updated_at desc"
   );
-  return result.rows.map((row) => row.payload);
+  return filterGroupsByWallet(
+    result.rows.map((row) => row.payload),
+    walletAddress
+  );
 }
 
 export async function getGroup(groupId: string): Promise<RentGroup | null> {
@@ -162,4 +170,13 @@ export async function appendAgentEvent(event: Omit<AgentEvent, "id" | "createdAt
     [next.id, next.groupId, JSON.stringify(next)]
   );
   return next;
+}
+
+function filterGroupsByWallet(groups: RentGroup[], walletAddress?: string): RentGroup[] {
+  if (!walletAddress) return groups;
+  const wallet = walletAddress.toLowerCase();
+  return groups.filter((group) => {
+    if (group.adminWalletAddress?.toLowerCase() === wallet) return true;
+    return group.roommates.some((roommate) => roommate.walletAddress.toLowerCase() === wallet);
+  });
 }

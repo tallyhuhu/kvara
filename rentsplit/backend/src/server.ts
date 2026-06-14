@@ -34,9 +34,10 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-app.get("/api/groups", async (_req, res, next) => {
+app.get("/api/groups", async (req, res, next) => {
   try {
-    res.json({ groups: await listGroups() });
+    const wallet = typeof req.query.wallet === "string" ? req.query.wallet : undefined;
+    res.json({ groups: await listGroups(wallet) });
   } catch (cause) {
     next(cause);
   }

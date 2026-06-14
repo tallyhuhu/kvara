@@ -66,6 +66,7 @@ type Props = {
   onCreate: (input: CreateGroupInput) => RentGroup;
   onPermissionGranted: (roommateId: string, permission: PermissionGrant) => void;
   onDeleteGroup: (groupId: string) => RentGroup | null;
+  onWalletConnected: (walletAddress: `0x${string}`) => Promise<RentGroup[]>;
   onPaymentsUpdated: (records: PaymentRecord[]) => void;
   onCommands: (commands: RentCommand[]) => void;
 };
@@ -81,6 +82,7 @@ export function KvaraChatWorkspace({
   onCreate,
   onPermissionGranted,
   onDeleteGroup,
+  onWalletConnected,
   onPaymentsUpdated,
   onCommands
 }: Props) {
@@ -177,6 +179,9 @@ export function KvaraChatWorkspace({
       const accounts = (await ethereum.request({ method: "eth_requestAccounts" })) as `0x${string}`[];
       if (!accounts[0]) throw new Error("No wallet account returned.");
       setAccount(accounts[0]);
+      if (!isInvite) {
+        await onWalletConnected(accounts[0]);
+      }
     } catch (cause) {
       setConnectError(cause instanceof Error ? cause.message : "Could not connect wallet.");
     }

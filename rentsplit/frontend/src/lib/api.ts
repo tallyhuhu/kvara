@@ -36,8 +36,9 @@ export async function collectAndPay(group: RentGroup): Promise<CollectResponse> 
   return postJson<CollectResponse>("/api/collect", { group });
 }
 
-export async function fetchGroups(): Promise<GroupsResponse> {
-  const response = await fetch(`${API_URL}/api/groups`);
+export async function fetchGroups(walletAddress?: string): Promise<GroupsResponse> {
+  const path = walletAddress ? `/api/groups?wallet=${encodeURIComponent(walletAddress)}` : "/api/groups";
+  const response = await fetch(`${API_URL}${path}`);
   const json = (await response.json().catch(() => ({}))) as GroupsResponse & { error?: string };
   if (!response.ok) throw new Error(json.error ?? `Request failed with ${response.status}`);
   return json;
