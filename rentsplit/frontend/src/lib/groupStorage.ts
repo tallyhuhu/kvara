@@ -51,6 +51,7 @@ export type RentGroup = {
   landlordAddress: `0x${string}`;
   totalRent: string;
   dueDay: number;
+  rentRunTime: string;
   nextRunAt: string;
   autopayEnabled: boolean;
   permissionBufferPercent: number;
@@ -214,6 +215,7 @@ export function normalizeGroup(group: RentGroup): RentGroup {
     propertyName: group.propertyName || "Apartment",
     propertyAddress: group.propertyAddress || "",
     dueDay,
+    rentRunTime: normalizeRentRunTime(group.rentRunTime),
     nextRunAt: group.nextRunAt || nextMonthlyRun(dueDay).toISOString(),
     autopayEnabled: group.autopayEnabled ?? true,
     permissionBufferPercent: group.permissionBufferPercent ?? DEFAULT_PERMISSION_BUFFER_PERCENT
@@ -297,6 +299,11 @@ function daysInMonth(year: number, month: number): number {
 
 function formatCents(cents: number): string {
   return (cents / 100).toFixed(2);
+}
+
+function normalizeRentRunTime(value: string | undefined): string {
+  if (!value || !/^\d{2}:\d{2}$/.test(value)) return "09:00";
+  return value;
 }
 
 function encodePayload(group: RentGroup): string {

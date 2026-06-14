@@ -28,6 +28,7 @@ type CreateGroupInput = {
   landlordAddress: `0x${string}`;
   totalRent: string;
   dueDay: number;
+  rentRunTime: string;
   nextRunAt: string;
   autopayEnabled: boolean;
   permissionBufferPercent: number;
@@ -112,6 +113,7 @@ export function useRentGroup() {
       landlordAddress: input.landlordAddress,
       totalRent: input.totalRent,
       dueDay: input.dueDay,
+      rentRunTime: input.rentRunTime,
       nextRunAt: input.nextRunAt || demoRunInMinutes(1),
       autopayEnabled: input.autopayEnabled,
       permissionBufferPercent: input.permissionBufferPercent,

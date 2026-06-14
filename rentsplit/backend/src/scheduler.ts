@@ -107,7 +107,7 @@ async function runAgent(groupId: string): Promise<void> {
       });
     }
 
-    const nextRunAt = nextMonthlyRun(group.dueDay ?? new Date().getDate()).toISOString();
+    const nextRunAt = nextMonthlyRun(group.dueDay ?? new Date().getDate(), new Date(), group.rentRunTime).toISOString();
     await saveGroup({ ...group, nextRunAt, updatedAt: Date.now() });
     await scheduleGroup({ ...group, nextRunAt, updatedAt: Date.now() });
   } finally {
@@ -123,20 +123,23 @@ function clearTimer(groupId: string): void {
 
 function normalizeSchedule(group: RentGroup): RentGroup {
   const dueDay = clampDay(group.dueDay ?? new Date().getDate());
+  const rentRunTime = normalizeRentRunTime(group.rentRunTime);
   return {
     ...group,
     dueDay,
-    nextRunAt: group.nextRunAt || nextMonthlyRun(dueDay).toISOString(),
+    rentRunTime,
+    nextRunAt: group.nextRunAt || nextMonthlyRun(dueDay, new Date(), rentRunTime).toISOString(),
     autopayEnabled: group.autopayEnabled ?? true,
     permissionBufferPercent: group.permissionBufferPercent ?? 30,
     updatedAt: Date.now()
   };
 }
 
-function nextMonthlyRun(dueDay: number, from = new Date()): Date {
+function nextMonthlyRun(dueDay: number, from = new Date(), rentRunTime = "09:00"): Date {
   const day = clampDay(dueDay);
+  const [hour, minute] = parseRentRunTime(rentRunTime);
   const candidate = new Date(from);
-  candidate.setHours(9, 0, 0, 0);
+  candidate.setHours(hour, minute, 0, 0);
   candidate.setDate(Math.min(day, daysInMonth(candidate.getFullYear(), candidate.getMonth())));
   if (candidate.getTime() <= from.getTime()) {
     candidate.setMonth(candidate.getMonth() + 1);
@@ -152,6 +155,19 @@ function clampDay(day: number): number {
 
 function daysInMonth(year: number, month: number): number {
   return new Date(year, month + 1, 0).getDate();
+}
+
+function normalizeRentRunTime(value: string | undefined): string {
+  if (!value || !/^\d{2}:\d{2}$/.test(value)) return "09:00";
+  const [hour, minute] = parseRentRunTime(value);
+  return `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
+}
+
+function parseRentRunTime(value: string): [number, number] {
+  const [rawHour, rawMinute] = value.split(":");
+  const hour = Math.min(23, Math.max(0, Number(rawHour)));
+  const minute = Math.min(59, Math.max(0, Number(rawMinute)));
+  return [Number.isFinite(hour) ? hour : 9, Number.isFinite(minute) ? minute : 0];
 }
 
 function formatDate(value: string): string {

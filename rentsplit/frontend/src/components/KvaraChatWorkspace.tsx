@@ -8,8 +8,10 @@ import {
   DoorOpen,
   Loader2,
   Play,
+  Plus,
   Send,
   ShieldCheck,
+  Trash2,
   Wallet,
   X
 } from "lucide-react";
@@ -19,7 +21,6 @@ import { sendVeniceMessage } from "../lib/veniceClient";
 import { useMetaMaskPermissions } from "../hooks/useMetaMaskPermissions";
 import {
   createInviteUrl,
-  demoRunInMinutes,
   formatUsd,
   normalizeAddress,
   permissionStatus,
@@ -39,6 +40,7 @@ type CreateGroupInput = {
   totalRent: string;
   dueDay: number;
   nextRunAt: string;
+  rentRunTime: string;
   autopayEnabled: boolean;
   permissionBufferPercent: number;
   roommates: Array<{ name: string; walletAddress: `0x${string}`; share?: string }>;
@@ -54,7 +56,16 @@ type SetupDraft = {
   propertyAddress: string;
   landlordAddress: string;
   totalRent: string;
-  residents: string;
+  dueDay: string;
+  rentRunTime: string;
+  residents: SetupResident[];
+};
+
+type SetupResident = {
+  id: string;
+  name: string;
+  walletAddress: string;
+  share: string;
 };
 
 type Props = {
@@ -92,7 +103,9 @@ export function KvaraChatWorkspace({
     propertyAddress: "",
     landlordAddress: "",
     totalRent: "3000.00",
-    residents: ""
+    dueDay: "1",
+    rentRunTime: "09:00",
+    residents: []
   });
   const [setupError, setSetupError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -109,6 +122,7 @@ export function KvaraChatWorkspace({
     if (!group || !account) return null;
     return group.roommates.find((roommate) => sameAddress(roommate.walletAddress, account)) ?? null;
   }, [account, group]);
+  const greeting = connectedRoommate ? residentGreeting(connectedRoommate) : null;
   const visibleGroup = account || isInvite ? group : null;
   const canManageGroup = Boolean(
     account && group && !isInvite && (!group.adminWalletAddress || sameAddress(group.adminWalletAddress, account))
@@ -128,8 +142,19 @@ export function KvaraChatWorkspace({
   useEffect(() => {
     if (!account) return;
     setSetupDraft((current) => {
-      if (current.residents.trim()) return current;
-      return { ...current, residents: `Me, ${account}` };
+      if (current.residents.some((resident) => sameAddress(resident.walletAddress, account))) return current;
+      return {
+        ...current,
+        residents: [
+          {
+            id: createMessageId("resident"),
+            name: "You",
+            walletAddress: account,
+            share: ""
+          },
+          ...current.residents
+        ]
+      };
     });
   }, [account]);
 
@@ -193,12 +218,13 @@ export function KvaraChatWorkspace({
 
     try {
       if (!account) throw new Error("Connect MetaMask first.");
-      const roommates = ensureCurrentResident(parseResidents(setupDraft.residents), account);
+      const roommates = ensureCurrentResident(parseResidentRows(setupDraft.residents, account), account);
       if (roommates.length === 0) throw new Error("Add at least one resident wallet.");
       const propertyAddress = setupDraft.propertyAddress.trim();
       if (!propertyAddress) throw new Error("Add the apartment address.");
       const totalRent = setupDraft.totalRent.trim();
       if (!Number(totalRent) || Number(totalRent) <= 0) throw new Error("Add the monthly rent.");
+      const schedule = buildRentSchedule(setupDraft.dueDay, setupDraft.rentRunTime);
 
       const created = onCreate({
         adminWalletAddress: account,
@@ -206,8 +232,9 @@ export function KvaraChatWorkspace({
         propertyAddress,
         landlordAddress: normalizeAddress(setupDraft.landlordAddress),
         totalRent,
-        dueDay: 1,
-        nextRunAt: demoRunInMinutes(1),
+        dueDay: schedule.dueDay,
+        nextRunAt: schedule.nextRunAt,
+        rentRunTime: schedule.rentRunTime,
         autopayEnabled: true,
         permissionBufferPercent: DEFAULT_BUFFER_PERCENT,
         roommates
@@ -334,9 +361,9 @@ export function KvaraChatWorkspace({
                     ? `You were invited to ${group?.propertyName ?? "an apartment"}. I can request the bounded permission when you are ready.`
                     : group
                       ? canManageGroup
-                        ? `I found ${group.propertyName}. You can ask me to recalculate rent, copy invites, or run the demo rent day.`
+                        ? `${greeting ? `${greeting}. ` : ""}I found ${group.propertyName}. You can ask me to recalculate rent, copy invites, or run the demo rent day.`
                         : connectedRoommate
-                          ? `I found ${group.propertyName}. I can request your bounded permission for this home.`
+                          ? `${greeting ? `${greeting}. ` : ""}I found ${group.propertyName}. I can request your bounded permission for this home.`
                           : `I found ${group.propertyName}. You can ask me rent questions from this wallet.`
                       : "This wallet has no Kvara apartment yet. Tell me the basics and I will prepare the rent room."}
               </AssistantBubble>
@@ -497,6 +524,33 @@ function SetupBubble({
   onChange: (draft: SetupDraft) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  function updateResident(id: string, patch: Partial<SetupResident>) {
+    onChange({
+      ...draft,
+      residents: draft.residents.map((resident) => (resident.id === id ? { ...resident, ...patch } : resident))
+    });
+  }
+
+  function addResident() {
+    onChange({
+      ...draft,
+      residents: [
+        ...draft.residents,
+        {
+          id: createMessageId("resident"),
+          name: "",
+          walletAddress: "",
+          share: ""
+        }
+      ]
+    });
+  }
+
+  function removeResident(id: string) {
+    if (draft.residents.length <= 1) return;
+    onChange({ ...draft, residents: draft.residents.filter((resident) => resident.id !== id) });
+  }
+
   return (
     <ActionBubble>
       <form onSubmit={onSubmit} className="grid gap-3">
@@ -528,14 +582,84 @@ function SetupBubble({
             />
           </Field>
         </div>
-        <Field label="Residents to invite">
-          <textarea
-            value={draft.residents}
-            onChange={(event) => onChange({ ...draft, residents: event.target.value })}
-            placeholder={"Maya, 0x...\nNiko, 0x..."}
-            rows={4}
-            className="w-full resize-none border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
-          />
+        <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
+          <Field label="Rent day">
+            <input
+              value={draft.dueDay}
+              onChange={(event) => onChange({ ...draft, dueDay: event.target.value })}
+              type="number"
+              min="1"
+              max="28"
+              step="1"
+              className="w-full border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+            />
+          </Field>
+          <Field label="Run time">
+            <input
+              value={draft.rentRunTime}
+              onChange={(event) => onChange({ ...draft, rentRunTime: event.target.value })}
+              type="time"
+              className="w-full border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+            />
+          </Field>
+        </div>
+        <Field label="Residents">
+          <div className="border border-stone-300 bg-white">
+            <div className="hidden grid-cols-[1fr_1.5fr_104px_42px] border-b border-stone-300 bg-stone-50 px-3 py-2 text-[11px] font-semibold uppercase text-stone-500 md:grid">
+              <span>Name</span>
+              <span>Wallet</span>
+              <span>Share</span>
+              <span />
+            </div>
+            <div className="divide-y divide-stone-200">
+              {draft.residents.map((resident, index) => (
+                <div key={resident.id} className="grid gap-2 px-3 py-3 md:grid-cols-[1fr_1.5fr_104px_42px] md:items-center">
+                  <input
+                    value={resident.name}
+                    onChange={(event) => updateResident(resident.id, { name: event.target.value })}
+                    placeholder={index === 0 ? "Your name" : "Maya"}
+                    className="w-full border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    aria-label="Resident name"
+                  />
+                  <input
+                    value={resident.walletAddress}
+                    onChange={(event) => updateResident(resident.id, { walletAddress: event.target.value })}
+                    placeholder="0x..."
+                    className="w-full border border-stone-300 bg-white px-3 py-2 font-mono text-xs outline-none focus:border-emerald-800"
+                    aria-label="Resident wallet"
+                  />
+                  <input
+                    value={resident.share}
+                    onChange={(event) => updateResident(resident.id, { share: event.target.value })}
+                    placeholder="Auto"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    className="w-full border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
+                    aria-label="Resident rent share"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeResident(resident.id)}
+                    disabled={draft.residents.length <= 1}
+                    className="grid h-10 w-10 place-items-center border border-stone-300 text-stone-500 transition hover:bg-stone-50 disabled:opacity-30"
+                    aria-label="Remove resident"
+                    title="Remove resident"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={addResident}
+              className="flex h-10 w-full items-center justify-center gap-2 border-t border-stone-300 text-sm font-semibold text-emerald-900 transition hover:bg-stone-50"
+            >
+              <Plus size={15} />
+              Add resident
+            </button>
+          </div>
         </Field>
         {error ? <p className="text-sm text-rose-700">{error}</p> : null}
         <button
@@ -653,9 +777,17 @@ function ApartmentActionsBubble({
               key={roommate.id}
               type="button"
               onClick={() => onCopyInvite(roommate)}
-              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition hover:bg-stone-50"
+              className="grid w-full gap-3 px-3 py-3 text-left text-sm transition hover:bg-stone-50 sm:grid-cols-[1fr_auto_auto] sm:items-center"
             >
-              <span className="min-w-0 truncate text-stone-700">{roommate.name}</span>
+              <span className="min-w-0">
+                <span className="block truncate font-semibold text-stone-900">{residentDisplayName(roommate)}</span>
+                <span className="mt-1 block truncate font-mono text-xs text-stone-500">
+                  {shortAddress(roommate.walletAddress)}
+                </span>
+              </span>
+              <span className="text-xs font-semibold uppercase text-stone-500">
+                {formatUsd(roommate.share)} USDC · {residentPermissionLabel(roommate)}
+              </span>
               <span className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-800">
                 {copiedInviteId === roommate.id ? "Copied" : "Invite"}
                 <Copy size={14} />
@@ -688,7 +820,9 @@ function ApartmentSnapshot({
   onEndLease: () => void;
 }) {
   const hasDraft = Boolean(
-    setupDraft.propertyAddress.trim() || setupDraft.landlordAddress.trim() || setupDraft.residents.trim()
+    setupDraft.propertyAddress.trim() ||
+      setupDraft.landlordAddress.trim() ||
+      setupDraft.residents.some((resident) => resident.name.trim() || resident.walletAddress.trim())
   );
 
   return (
@@ -714,12 +848,24 @@ function ApartmentSnapshot({
 
       <div className="grid grid-cols-2 border-b border-stone-300">
         <BriefMetric label="Monthly rent" value={group ? `${formatUsd(group.totalRent)} USDC` : hasDraft ? `${formatUsd(setupDraft.totalRent)} USDC` : "Waiting"} />
-        <BriefMetric label="Residents ready" value={group ? `${stats.granted}/${stats.total}` : hasDraft ? `${parseResidentsSafe(setupDraft.residents).length}` : "Waiting"} />
+        <BriefMetric
+          label="Residents ready"
+          value={group ? `${stats.granted}/${stats.total}` : hasDraft ? `${parseResidentRowsSafe(setupDraft.residents).length}` : "Waiting"}
+        />
       </div>
 
       <div className="space-y-4 p-4 text-sm">
         <SnapshotRow label="Place" value={group?.propertyAddress || setupDraft.propertyAddress || "Waiting for address"} />
-        <SnapshotRow label="Rent day" value={group?.autopayEnabled ? "Runs automatically" : group ? "Paused" : "Set after setup"} />
+        <SnapshotRow
+          label="Rent day"
+          value={
+            group?.autopayEnabled
+              ? formatRentRun(group.nextRunAt, group.dueDay, group.rentRunTime)
+              : group
+                ? "Paused"
+                : formatDraftRentRun(setupDraft.dueDay, setupDraft.rentRunTime)
+          }
+        />
         {inviteRoommate ? <SnapshotRow label="Your part" value={`${formatUsd(inviteRoommate.share)} USDC`} /> : null}
         {group ? <SnapshotRow label="Collected this month" value={`${formatUsd(stats.monthlyTotal)} USDC`} /> : null}
       </div>
@@ -789,37 +935,127 @@ function humanPaymentStatus(status: PaymentRecord["status"]): string {
   return "needs attention";
 }
 
-function parseResidents(value: string): Array<{ name: string; walletAddress: `0x${string}` }> {
-  return value
-    .split("\n")
-    .map((line, index) => {
-      const [rawName, rawWallet] = line.split(",").map((part) => part.trim());
-      if (!rawName && !rawWallet) return null;
-      if (!rawWallet || !isAddress(rawWallet)) {
-        throw new Error(`Resident ${index + 1} needs a valid wallet address.`);
-      }
-      return {
-        name: rawName || `Resident ${index + 1}`,
-        walletAddress: rawWallet as `0x${string}`
-      };
-    })
-    .filter(Boolean) as Array<{ name: string; walletAddress: `0x${string}` }>;
+function parseResidentRows(
+  residents: SetupResident[],
+  account?: `0x${string}`
+): Array<{ name: string; walletAddress: `0x${string}`; share?: string }> {
+  const seen = new Set<string>();
+  const parsed: Array<{ name: string; walletAddress: `0x${string}`; share?: string }> = [];
+
+  residents.forEach((resident, index) => {
+    const walletAddress = resident.walletAddress.trim();
+    const hasAnyValue = resident.name.trim() || walletAddress || resident.share.trim();
+    if (!hasAnyValue) return;
+    if (!isAddress(walletAddress)) throw new Error(`Resident ${index + 1} needs a valid wallet address.`);
+
+    const normalizedWallet = walletAddress.toLowerCase();
+    if (seen.has(normalizedWallet)) throw new Error("Resident wallets must be unique.");
+    seen.add(normalizedWallet);
+
+    const share = resident.share.trim();
+    if (share && (!Number(share) || Number(share) <= 0)) {
+      throw new Error(`Resident ${index + 1} needs a valid rent share or an empty auto split.`);
+    }
+
+    parsed.push({
+      name:
+        resident.name.trim() ||
+        (account && sameAddress(walletAddress, account) ? "You" : `Resident ${parsed.length + 1}`),
+      walletAddress: walletAddress as `0x${string}`,
+      share: share || undefined
+    });
+  });
+
+  return parsed;
 }
 
-function parseResidentsSafe(value: string): Array<{ name: string; walletAddress: `0x${string}` }> {
+function parseResidentRowsSafe(
+  residents: SetupResident[]
+): Array<{ name: string; walletAddress: `0x${string}`; share?: string }> {
   try {
-    return parseResidents(value);
+    return parseResidentRows(residents);
   } catch {
     return [];
   }
 }
 
 function ensureCurrentResident(
-  roommates: Array<{ name: string; walletAddress: `0x${string}` }>,
+  roommates: Array<{ name: string; walletAddress: `0x${string}`; share?: string }>,
   account: `0x${string}`
-): Array<{ name: string; walletAddress: `0x${string}` }> {
+): Array<{ name: string; walletAddress: `0x${string}`; share?: string }> {
   if (roommates.some((roommate) => sameAddress(roommate.walletAddress, account))) return roommates;
-  return [{ name: "Me", walletAddress: account }, ...roommates];
+  return [{ name: "You", walletAddress: account }, ...roommates];
+}
+
+function buildRentSchedule(dueDayValue: string, rentRunTimeValue: string): {
+  dueDay: number;
+  rentRunTime: string;
+  nextRunAt: string;
+} {
+  const dueDay = clampDay(Number(dueDayValue));
+  const rentRunTime = normalizeRentRunTime(rentRunTimeValue);
+  const [hour, minute] = rentRunTime.split(":").map(Number);
+  const nextRun = new Date();
+  nextRun.setHours(hour, minute, 0, 0);
+  nextRun.setDate(Math.min(dueDay, daysInMonth(nextRun.getFullYear(), nextRun.getMonth())));
+  if (nextRun.getTime() <= Date.now()) {
+    nextRun.setMonth(nextRun.getMonth() + 1);
+    nextRun.setDate(Math.min(dueDay, daysInMonth(nextRun.getFullYear(), nextRun.getMonth())));
+  }
+
+  return { dueDay, rentRunTime, nextRunAt: nextRun.toISOString() };
+}
+
+function formatDraftRentRun(dueDay: string, rentRunTime: string): string {
+  const schedule = buildRentSchedule(dueDay, rentRunTime);
+  return `Day ${schedule.dueDay} at ${schedule.rentRunTime}`;
+}
+
+function formatRentRun(nextRunAt: string | undefined, dueDay: number, rentRunTime: string): string {
+  if (!nextRunAt) return `Day ${dueDay} at ${rentRunTime}`;
+  return `Next ${new Date(nextRunAt).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  })}`;
+}
+
+function residentDisplayName(roommate: Roommate): string {
+  return roommate.name.trim() || shortAddress(roommate.walletAddress);
+}
+
+function residentGreeting(roommate: Roommate): string {
+  const name = residentDisplayName(roommate);
+  if (name.toLowerCase() === "you" || name.toLowerCase() === "me") return "Welcome back";
+  return `Welcome, ${name}`;
+}
+
+function residentPermissionLabel(roommate: Roommate): string {
+  const status = permissionStatus(roommate);
+  if (status === "granted") return "ready";
+  if (status === "expired") return "expired";
+  if (status === "failed") return "failed";
+  return "pending";
+}
+
+function normalizeRentRunTime(value: string): string {
+  if (!/^\d{2}:\d{2}$/.test(value)) return "09:00";
+  const [rawHour, rawMinute] = value.split(":");
+  const hour = Math.min(23, Math.max(0, Number(rawHour)));
+  const minute = Math.min(59, Math.max(0, Number(rawMinute)));
+  return `${(Number.isFinite(hour) ? hour : 9).toString().padStart(2, "0")}:${(Number.isFinite(minute) ? minute : 0)
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+function clampDay(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(28, Math.max(1, Math.round(value)));
+}
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month + 1, 0).getDate();
 }
 
 function derivePropertyName(address: string): string {

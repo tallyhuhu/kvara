@@ -37,6 +37,7 @@ export type RentGroup = {
   landlordAddress: `0x${string}`;
   totalRent: string;
   dueDay?: number;
+  rentRunTime?: string;
   nextRunAt?: string;
   autopayEnabled?: boolean;
   permissionBufferPercent?: number;
