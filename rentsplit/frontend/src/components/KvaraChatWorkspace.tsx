@@ -341,6 +341,21 @@ export function KvaraChatWorkspace({
       setAgentEvents(response.events);
       setAgentRunning(response.running);
       pushAssistant(summarizeAgentRun(group, response.payments, response.events, existingPaymentIds, startedAt));
+      const taskIds = response.payments
+        .map((payment) => payment.taskId)
+        .filter((taskId): taskId is string => Boolean(taskId));
+      if (taskIds.length > 0) {
+        await wait(1500);
+        try {
+          const statusResponse = await refreshStatuses(taskIds);
+          if (statusResponse.payments.length > 0) {
+            onPaymentsUpdated(statusResponse.payments);
+            pushAssistant(summarizeRelayerStatus(statusResponse.payments));
+          }
+        } catch {
+          pushAssistant("1Shot accepted the payment task. Transaction status is still pending.");
+        }
+      }
     } catch (cause) {
       pushAssistant(cause instanceof Error ? cause.message : "Agent run failed.");
     } finally {
@@ -377,10 +392,11 @@ export function KvaraChatWorkspace({
     setAsking(true);
     try {
       const response = await sendVeniceMessage({ message, group, history });
+      const commandSummary = response.commands.length > 0 ? summarizeRentCommands(group, response.commands) : "";
       if (response.commands.length > 0) {
         onCommands(response.commands);
       }
-      pushAssistant(response.message);
+      pushAssistant(joinChatSections(response.message, commandSummary));
     } catch (cause) {
       pushAssistant(cause instanceof Error ? cause.message : "Kvara agent request failed.");
     } finally {
@@ -566,8 +582,8 @@ function AssistantBubble({ children }: { children: string }) {
       <div className="grid h-8 w-8 shrink-0 place-items-center bg-emerald-950 text-stone-50">
         <Bot size={16} />
       </div>
-      <div className="max-w-[760px] border border-stone-300 bg-white px-4 py-3 text-sm leading-relaxed text-stone-800">
-        {children}
+      <div className="max-w-[760px] whitespace-pre-line border border-stone-300 bg-white px-4 py-3 text-sm leading-relaxed text-stone-800">
+        <LinkifiedText text={children} />
       </div>
     </div>
   );
@@ -576,8 +592,33 @@ function AssistantBubble({ children }: { children: string }) {
 function UserBubble({ children }: { children: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[720px] bg-emerald-950 px-4 py-3 text-sm leading-relaxed text-white">{children}</div>
+      <div className="max-w-[720px] whitespace-pre-line bg-emerald-950 px-4 py-3 text-sm leading-relaxed text-white">
+        {children}
+      </div>
     </div>
+  );
+}
+
+function LinkifiedText({ text }: { text: string }) {
+  const parts = text.split(/(https?:\/\/[^\s]+)/g);
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.startsWith("http") ? (
+          <a
+            key={`${part}-${index}`}
+            href={part}
+            target="_blank"
+            rel="noreferrer"
+            className="font-semibold text-emerald-800 underline underline-offset-2"
+          >
+            {part}
+          </a>
+        ) : (
+          <span key={`${part}-${index}`}>{part}</span>
+        )
+      )}
+    </>
   );
 }
 
@@ -959,6 +1000,12 @@ function ApartmentSnapshot({
         {group ? <SnapshotRow label="Collected this month" value={`${formatUsd(stats.monthlyTotal)} USDC`} /> : null}
       </div>
 
+      {group ? (
+        <ResidentsSnapshot roommates={group.roommates} />
+      ) : hasDraft ? (
+        <DraftResidentsSnapshot residents={parseResidentRowsSafe(setupDraft.residents)} />
+      ) : null}
+
       <div className="border-t border-stone-300 p-4">
         <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase text-stone-500">
           <CalendarClock size={14} />
@@ -988,6 +1035,56 @@ function ApartmentSnapshot({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function ResidentsSnapshot({ roommates }: { roommates: Roommate[] }) {
+  return (
+    <div className="border-t border-stone-300 p-4">
+      <p className="text-xs font-semibold uppercase text-stone-500">Residents this month</p>
+      <div className="mt-3 divide-y divide-stone-300 border border-stone-300 bg-white">
+        {roommates.map((roommate) => (
+          <div key={roommate.id} className="grid grid-cols-[1fr_auto] gap-3 px-3 py-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-stone-950">{residentDisplayName(roommate)}</p>
+              <p className="mt-1 truncate font-mono text-[11px] text-stone-500">{shortAddress(roommate.walletAddress)}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-sm font-semibold text-stone-950">{formatUsd(roommate.share)} USDC</p>
+              <p className="mt-1 text-[11px] font-semibold uppercase text-stone-500">
+                {residentPermissionLabel(roommate)}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DraftResidentsSnapshot({
+  residents
+}: {
+  residents: Array<{ name: string; walletAddress: `0x${string}`; share?: string }>;
+}) {
+  if (residents.length === 0) return null;
+  return (
+    <div className="border-t border-stone-300 p-4">
+      <p className="text-xs font-semibold uppercase text-stone-500">Residents draft</p>
+      <div className="mt-3 divide-y divide-stone-300 border border-stone-300 bg-white">
+        {residents.map((resident) => (
+          <div key={resident.walletAddress} className="grid grid-cols-[1fr_auto] gap-3 px-3 py-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-stone-950">{resident.name}</p>
+              <p className="mt-1 truncate font-mono text-[11px] text-stone-500">{shortAddress(resident.walletAddress)}</p>
+            </div>
+            <p className="text-sm font-semibold text-stone-950">
+              {resident.share ? `${formatUsd(resident.share)} USDC` : "Auto"}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1024,6 +1121,39 @@ function humanPaymentStatus(status: PaymentRecord["status"]): string {
   return "needs attention";
 }
 
+function summarizeRentCommands(group: RentGroup, commands: RentCommand[]): string {
+  const lines: string[] = [];
+
+  commands.forEach((command) => {
+    if (command.type === "set_splits") {
+      const splitLines = command.splits
+        .map((split) => {
+          const roommate = group.roommates.find((item) => item.id === split.roommateId);
+          if (!roommate) return "";
+          if (Number(roommate.share).toFixed(2) === Number(split.share).toFixed(2)) return "";
+          return `- ${residentDisplayName(roommate)}: ${formatUsd(roommate.share)} -> ${formatUsd(split.share)} USDC`;
+        })
+        .filter(Boolean);
+      if (splitLines.length > 0) {
+        lines.push("Updated this month's split:");
+        lines.push(...splitLines);
+        lines.push(`Total rent stays ${formatUsd(group.totalRent)} USDC.`);
+      }
+    }
+
+    if (command.type === "add_roommate") {
+      lines.push(`Added ${command.name} at ${formatUsd(command.share)} USDC.`);
+    }
+
+    if (command.type === "remove_roommate") {
+      const roommate = group.roommates.find((item) => item.id === command.roommateId);
+      lines.push(`Removed ${roommate ? residentDisplayName(roommate) : "a resident"} from this month's split.`);
+    }
+  });
+
+  return lines.join("\n");
+}
+
 function summarizeAgentRun(
   group: RentGroup,
   payments: PaymentRecord[],
@@ -1056,10 +1186,13 @@ function summarizeAgentRun(
       confirmed ? `${confirmed} confirmed` : ""
     ].filter(Boolean);
     const blockedText = blocked.length > 0 ? ` ${formatBlockedPayments(blocked)}` : "";
-    return `Rent day started: ${parts.join(", ")}.${blockedText}`;
+    return joinChatSections(`Rent day started: ${parts.join(", ")}.${blockedText}`, formatPaymentAttempts(runPayments));
   }
 
-  return `I checked rent day, but no payment was submitted. ${formatBlockedPayments(blocked)}`;
+  return joinChatSections(
+    `I checked rent day, but no payment was submitted. ${formatBlockedPayments(blocked)}`,
+    formatPaymentAttempts(runPayments)
+  );
 }
 
 function formatBlockedPayments(payments: PaymentRecord[]): string {
@@ -1072,6 +1205,35 @@ function formatBlockedPayments(payments: PaymentRecord[]): string {
   return `Blocked: ${visible.join("; ")}${rest}.`;
 }
 
+function formatPaymentAttempts(payments: PaymentRecord[]): string {
+  if (payments.length === 0) return "";
+  return ["Payment attempts:", ...payments.map((payment) => `- ${formatPaymentLine(payment)}`)].join("\n");
+}
+
+function summarizeRelayerStatus(payments: PaymentRecord[]): string {
+  return ["1Shot status:", ...payments.map((payment) => `- ${formatPaymentLine(payment)}`)].join("\n");
+}
+
+function formatPaymentLine(payment: PaymentRecord): string {
+  const name = payment.roommateName || shortAddress(payment.walletAddress);
+  const amount = `${formatUsd(payment.amount)} USDC`;
+  const explorerUrl = payment.basescanUrl ?? (payment.txHash ? `https://basescan.org/tx/${payment.txHash}` : "");
+
+  if (payment.status === "confirmed") {
+    return `${name}: confirmed ${amount}${explorerUrl ? ` - ${explorerUrl}` : ""}`;
+  }
+  if (payment.status === "submitted") {
+    return `${name}: submitted ${amount}${explorerUrl ? ` - ${explorerUrl}` : ` - task ${payment.taskId ?? "pending"}`}`;
+  }
+  if (payment.status === "pending") {
+    return `${name}: pending ${amount}${payment.taskId ? ` - task ${payment.taskId}` : ""}`;
+  }
+  if (payment.status === "rejected") {
+    return `${name}: rejected ${amount} - ${humanPaymentError(payment.error)}`;
+  }
+  return `${name}: blocked ${amount} - ${humanPaymentError(payment.error)}`;
+}
+
 function humanPaymentError(error: string | undefined): string {
   if (!error) return "needs attention";
   const lower = error.toLowerCase();
@@ -1082,6 +1244,16 @@ function humanPaymentError(error: string | undefined): string {
     return "wallet likely needs USDC on Base";
   }
   return error;
+}
+
+function joinChatSections(...sections: string[]): string {
+  return sections.map((section) => section.trim()).filter(Boolean).join("\n\n");
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function parseResidentRows(
