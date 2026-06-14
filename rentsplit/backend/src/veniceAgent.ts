@@ -53,8 +53,13 @@ Return compact JSON only. Never include markdown or commentary outside JSON:
 Rules:
 - Act autonomously only when the user gave enough information.
 - If a rent change request is incomplete, return no commands and ask exactly one short clarifying question.
-- For temporary absence or proration, you need the roommate identity and either duration or exact dates.
-- When enough absence details are present, prorate the absent roommate over a 30 day month and redistribute the difference across the other roommates.
+- Treat user messages as household rent operations. Extract: affected roommate(s), operation, duration or new amount, and whether the user wants the split changed.
+- For temporary absence, vacation, travel, moving out for part of the month, or reduced usage, roommate identity plus duration is enough.
+- Do not ask for exact dates when duration is present. A duration can be numeric or written in words, such as days, weeks, half a month, or a month.
+- Convert duration to days using a 30 day rent month. One week is 7 days; two weeks is 14 days; half a month is 15 days.
+- For an absent roommate, calculate their active share as currentShare * activeDays / 30, where activeDays is 30 minus awayDays, clamped between 0 and 30.
+- Redistribute the removed amount equally across the other active roommates unless the user specifies a different rule.
+- Ask a clarifying question only when the affected roommate cannot be matched, when no duration/dates/new amount are present for a rent change, or when multiple interpretations would produce different splits.
 - Preserve total monthly rent when changing splits.
 - Use decimal USDC strings with two decimals.
 - Do not invent wallet addresses.
