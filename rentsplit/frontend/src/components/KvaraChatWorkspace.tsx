@@ -345,12 +345,10 @@ export function KvaraChatWorkspace({
         .map((payment) => payment.taskId)
         .filter((taskId): taskId is string => Boolean(taskId));
       if (taskIds.length > 0) {
-        await wait(1500);
         try {
-          const statusResponse = await refreshStatuses(taskIds);
-          if (statusResponse.payments.length > 0) {
-            onPaymentsUpdated(statusResponse.payments);
-            pushAssistant(summarizeRelayerStatus(statusResponse.payments));
+          const payments = await pollRelayerStatuses(taskIds, onPaymentsUpdated);
+          if (payments.length > 0) {
+            pushAssistant(summarizeRelayerStatus(payments));
           }
         } catch {
           pushAssistant("1Shot accepted the payment task. Transaction status is still pending.");
@@ -1248,6 +1246,36 @@ function humanPaymentError(error: string | undefined): string {
 
 function joinChatSections(...sections: string[]): string {
   return sections.map((section) => section.trim()).filter(Boolean).join("\n\n");
+}
+
+async function pollRelayerStatuses(
+  taskIds: string[],
+  onPaymentsUpdated: (records: PaymentRecord[]) => void
+): Promise<PaymentRecord[]> {
+  let latest: PaymentRecord[] = [];
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await wait(attempt === 0 ? 1500 : 3000);
+    const response = await refreshStatuses(taskIds);
+    if (response.payments.length > 0) {
+      latest = response.payments;
+      onPaymentsUpdated(response.payments);
+    }
+
+    if (latest.length > 0 && latest.every((payment) => paymentHasExplorerLink(payment) || paymentIsTerminal(payment))) {
+      break;
+    }
+  }
+
+  return latest;
+}
+
+function paymentHasExplorerLink(payment: PaymentRecord): boolean {
+  return Boolean(payment.basescanUrl || payment.txHash);
+}
+
+function paymentIsTerminal(payment: PaymentRecord): boolean {
+  return payment.status === "confirmed" || payment.status === "failed" || payment.status === "rejected";
 }
 
 function wait(ms: number): Promise<void> {
