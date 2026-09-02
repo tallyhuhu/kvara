@@ -26,13 +26,13 @@ const steps = [
   {
     eyebrow: "03 / Agent",
     title: "Rent day runs itself",
-    text: "The backend household agent waits for the due date and submits delegated payments through 1Shot.",
+    text: "The household agent waits for the due date and submits verifiable, attributed payments on Base.",
     icon: CalendarClock
   },
   {
     eyebrow: "04 / Changes",
     title: "Life gets recalculated",
-    text: "Venice parses requests like temporary absences, proposes new splits, then the agent keeps the schedule.",
+    text: "Venice understands household changes and Kvara applies a validated split while keeping the rent schedule.",
     icon: Bot
   }
 ];
@@ -86,13 +86,13 @@ export function LandingPage({ onEnterApp }: Props) {
         <div className="mx-auto w-full max-w-[1520px]">
           <div className="landing-reveal max-w-5xl">
             <p className="mb-5 max-w-xl text-sm font-semibold uppercase text-[#d8c7a3]">
-              Shared apartments, autonomous rent
+              Autonomous recurring payments on Base
             </p>
             <h1 className="text-[18vw] font-semibold leading-[0.78] tracking-[0] sm:text-[15vw] lg:text-[9.7vw]">
               Kvara
             </h1>
             <p className="mt-7 max-w-xl text-xl leading-snug text-stone-100 md:text-2xl">
-              Roommates grant bounded permissions once. The household agent handles rent when the month turns.
+              Grant a bounded USDC permission once. Kvara coordinates every share and settles rent on Base automatically.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <button

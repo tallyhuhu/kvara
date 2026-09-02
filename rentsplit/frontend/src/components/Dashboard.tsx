@@ -62,7 +62,7 @@ export function Dashboard({
     if (pendingTaskIds.length === 0) return;
     const interval = window.setInterval(async () => {
       try {
-        const response = await refreshStatuses(pendingTaskIds);
+        const response = await refreshStatuses(group.id, pendingTaskIds);
         onPaymentsUpdated(response.payments);
       } catch {
         window.clearInterval(interval);
@@ -79,7 +79,7 @@ export function Dashboard({
       if (cancelled) return;
       setAgentEvents(response.events);
       setAgentNextRunAt(response.nextRunAt);
-      setAgentRunning(response.running);
+      setAgentRunning(false);
       if (response.payments.length > 0) onPaymentsUpdated(response.payments);
     }
 
@@ -99,11 +99,11 @@ export function Dashboard({
     setAgentRunning(true);
     setError(null);
     try {
-      const response = await runAgentNow(group);
+      const response = await runAgentNow(group.id);
       onPaymentsUpdated(response.payments);
       setAgentEvents(response.events);
       setAgentNextRunAt(response.nextRunAt);
-      setAgentRunning(response.running);
+      setAgentRunning(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Agent run failed");
       setAgentRunning(false);

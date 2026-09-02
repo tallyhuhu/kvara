@@ -1,7 +1,10 @@
-import { KvaraChatWorkspace } from "./components/KvaraChatWorkspace";
 import { LandingPage } from "./components/LandingPage";
 import { useRentGroup } from "./hooks/useRentGroup";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+
+const KvaraChatWorkspace = lazy(() => import("./components/KvaraChatWorkspace").then((module) => ({
+  default: module.KvaraChatWorkspace
+})));
 
 export default function App() {
   const [view, setView] = useState<"landing" | "app">(() =>
@@ -40,6 +43,30 @@ export default function App() {
 
   if (isInvite) {
     return (
+      <WorkspaceFallback>
+        <KvaraChatWorkspace
+          group={activeGroup}
+          inviteRoommate={inviteRoommate}
+          isInvite={isInvite}
+          history={history}
+          stats={stats}
+          onCreate={createGroup}
+          onPermissionGranted={updateRoommatePermission}
+          onDeleteGroup={deleteGroup}
+          onWalletConnected={loadGroupsForWallet}
+          onPaymentsUpdated={mergePaymentRecords}
+          onCommands={applyCommands}
+        />
+      </WorkspaceFallback>
+    );
+  }
+
+  if (view === "landing") {
+    return <LandingPage onEnterApp={enterApp} />;
+  }
+
+  return (
+    <WorkspaceFallback>
       <KvaraChatWorkspace
         group={activeGroup}
         inviteRoommate={inviteRoommate}
@@ -53,26 +80,18 @@ export default function App() {
         onPaymentsUpdated={mergePaymentRecords}
         onCommands={applyCommands}
       />
-    );
-  }
+    </WorkspaceFallback>
+  );
+}
 
-  if (view === "landing") {
-    return <LandingPage onEnterApp={enterApp} />;
-  }
-
+function WorkspaceFallback({ children }: { children: React.ReactNode }) {
   return (
-    <KvaraChatWorkspace
-      group={activeGroup}
-      inviteRoommate={inviteRoommate}
-      isInvite={isInvite}
-      history={history}
-      stats={stats}
-      onCreate={createGroup}
-      onPermissionGranted={updateRoommatePermission}
-      onDeleteGroup={deleteGroup}
-      onWalletConnected={loadGroupsForWallet}
-      onPaymentsUpdated={mergePaymentRecords}
-      onCommands={applyCommands}
-    />
+    <Suspense fallback={(
+      <main className="grid min-h-screen place-items-center bg-[#f4efe5] text-stone-950" aria-busy="true">
+        <span className="font-display text-3xl">Kvara</span>
+      </main>
+    )}>
+      {children}
+    </Suspense>
   );
 }

@@ -31,7 +31,7 @@ type Props = {
     autopayEnabled: boolean;
     permissionBufferPercent: number;
     roommates: Array<{ name: string; walletAddress: `0x${string}`; share: string }>;
-  }) => RentGroup;
+  }) => Promise<RentGroup>;
 };
 
 export function CreateGroup({ activeGroup, onCreate }: Props) {
@@ -112,7 +112,7 @@ export function CreateGroup({ activeGroup, onCreate }: Props) {
     );
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
 
@@ -129,7 +129,7 @@ export function CreateGroup({ activeGroup, onCreate }: Props) {
         throw new Error("Roommate shares must add up to the monthly rent.");
       }
 
-      const group = onCreate({
+      const group = await onCreate({
         propertyName,
         propertyAddress,
         landlordAddress: normalizeAddress(landlordAddress),

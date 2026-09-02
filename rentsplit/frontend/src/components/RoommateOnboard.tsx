@@ -14,7 +14,7 @@ import {
 type Props = {
   group: RentGroup;
   roommate: Roommate;
-  onPermissionGranted: (roommateId: string, permission: PermissionGrant) => void;
+  onPermissionGranted: (roommateId: string, permission: PermissionGrant) => Promise<void>;
 };
 
 export function RoommateOnboard({ group, roommate, onPermissionGranted }: Props) {
@@ -24,7 +24,7 @@ export function RoommateOnboard({ group, roommate, onPermissionGranted }: Props)
 
   async function handleGrant() {
     const permission = await requestRentPermission(group, roommate);
-    onPermissionGranted(roommate.id, permission);
+    await onPermissionGranted(roommate.id, permission);
   }
 
   return (

@@ -13,6 +13,7 @@
     "@metamask/smart-accounts-kit": "^1.6.0",
     "@tailwindcss/vite": "^4.3.1",
     "lucide-react": "^1.18.0",
+    "ox": "^0.14.44",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tailwindcss": "^4.3.1",

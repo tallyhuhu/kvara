@@ -6,7 +6,7 @@ import type { PaymentRecord, RentCommand, RentGroup } from "../lib/groupStorage"
 type Props = {
   group: RentGroup;
   history: PaymentRecord[];
-  onCommands: (commands: RentCommand[]) => void;
+  onCommands: (commands: RentCommand[], serverGroup?: RentGroup) => void;
 };
 
 export function VeniceChat({ group, history, onCommands }: Props) {
@@ -28,9 +28,9 @@ export function VeniceChat({ group, history, onCommands }: Props) {
     setMessages((current) => [...current, { role: "user", content: message }]);
 
     try {
-      const response = await sendVeniceMessage({ message, group, history });
+      const response = await sendVeniceMessage({ message, groupId: group.id });
       if (response.commands.length > 0) {
-        onCommands(response.commands);
+        onCommands(response.commands, response.group);
       }
       setMessages((current) => [...current, { role: "assistant", content: response.message }]);
     } catch (cause) {

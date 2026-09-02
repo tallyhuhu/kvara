@@ -15,11 +15,13 @@ import {
   Wallet,
   X
 } from "lucide-react";
-import { isAddress } from "viem";
-import { getAgentState, refreshStatuses, runAgentNow } from "../lib/api";
+import { formatUnits, isAddress } from "viem";
+import { clearWalletSession, getAgentState, refreshStatuses, runAgentNow } from "../lib/api";
 import { sendVeniceMessage } from "../lib/veniceClient";
 import { useMetaMaskPermissions } from "../hooks/useMetaMaskPermissions";
 import {
+  BASE_CHAIN_HEX,
+  BASE_EXPLORER_URL,
   createInviteUrl,
   formatUsd,
   normalizeAddress,
@@ -74,12 +76,12 @@ type Props = {
   isInvite: boolean;
   history: PaymentRecord[];
   stats: { granted: number; total: number; monthlyTotal: number };
-  onCreate: (input: CreateGroupInput) => RentGroup;
-  onPermissionGranted: (roommateId: string, permission: PermissionGrant) => void;
-  onDeleteGroup: (groupId: string) => RentGroup | null;
+  onCreate: (input: CreateGroupInput) => Promise<RentGroup>;
+  onPermissionGranted: (roommateId: string, permission: PermissionGrant) => Promise<void>;
+  onDeleteGroup: (groupId: string) => Promise<boolean>;
   onWalletConnected: (walletAddress: `0x${string}`) => Promise<RentGroup[]>;
   onPaymentsUpdated: (records: PaymentRecord[]) => void;
-  onCommands: (commands: RentCommand[]) => void;
+  onCommands: (commands: RentCommand[], serverGroup: RentGroup) => Promise<RentGroup | null>;
 };
 
 const DEFAULT_BUFFER_PERCENT = 30;
@@ -105,6 +107,7 @@ export function KvaraChatWorkspace({
 }: Props) {
   const [account, setAccount] = useState<`0x${string}` | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [walletChainId, setWalletChainId] = useState<string | null>(null);
   const [setupDraft, setSetupDraft] = useState<SetupDraft>({
     propertyAddress: "",
     landlordAddress: "",
@@ -148,11 +151,12 @@ export function KvaraChatWorkspace({
     async (nextAccount: `0x${string}`) => {
       setConnectError(null);
       setAccount(nextAccount);
-      if (!isInvite) {
-        await onWalletConnected(nextAccount);
-      }
+      const ethereum = window.ethereum as MetaMaskProvider | undefined;
+      const chainId = await ethereum?.request({ method: "eth_chainId" });
+      setWalletChainId(typeof chainId === "string" ? chainId.toLowerCase() : null);
+      await onWalletConnected(nextAccount);
     },
-    [isInvite, onWalletConnected]
+    [onWalletConnected]
   );
 
   useEffect(() => {
@@ -191,8 +195,9 @@ export function KvaraChatWorkspace({
       });
     };
 
-    const handleChainChanged = () => {
+    const handleChainChanged = (value: unknown) => {
       setConnectError(null);
+      setWalletChainId(typeof value === "string" ? value.toLowerCase() : null);
     };
 
     ethereum.on("accountsChanged", handleAccountsChanged);
@@ -213,7 +218,7 @@ export function KvaraChatWorkspace({
       const response = await getAgentState(groupId);
       if (cancelled) return;
       setAgentEvents(response.events);
-      setAgentRunning(response.running);
+      setAgentRunning(false);
       if (response.payments.length > 0) onPaymentsUpdated(response.payments);
     }
 
@@ -231,14 +236,15 @@ export function KvaraChatWorkspace({
     if (pendingTaskIds.length === 0) return;
     const interval = window.setInterval(async () => {
       try {
-        const response = await refreshStatuses(pendingTaskIds);
+        if (!group) return;
+        const response = await refreshStatuses(group.id, pendingTaskIds);
         onPaymentsUpdated(response.payments);
       } catch {
         window.clearInterval(interval);
       }
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [onPaymentsUpdated, pendingTaskIds]);
+  }, [group, onPaymentsUpdated, pendingTaskIds]);
 
   async function connectWallet() {
     setConnectError(null);
@@ -279,11 +285,24 @@ export function KvaraChatWorkspace({
     } catch {
       // Some wallets do not expose revocation; local session reset is still useful.
     }
+    if (account) clearWalletSession(account);
     setAccount(null);
+    setWalletChainId(null);
     setConnectError(null);
   }
 
-  function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
+  async function switchToBase() {
+    const ethereum = window.ethereum as MetaMaskProvider | undefined;
+    if (!ethereum) return;
+    try {
+      await ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BASE_CHAIN_HEX }] });
+      setWalletChainId(BASE_CHAIN_HEX);
+    } catch (cause) {
+      setConnectError(cause instanceof Error ? cause.message : "Could not switch to Base Mainnet.");
+    }
+  }
+
+  async function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSetupError(null);
 
@@ -297,7 +316,7 @@ export function KvaraChatWorkspace({
       if (!Number(totalRent) || Number(totalRent) <= 0) throw new Error("Add the monthly rent.");
       const schedule = buildRentSchedule(setupDraft.dueDay, setupDraft.rentRunTime);
 
-      const created = onCreate({
+      const created = await onCreate({
         adminWalletAddress: account,
         propertyName: derivePropertyName(propertyAddress),
         propertyAddress,
@@ -326,7 +345,7 @@ export function KvaraChatWorkspace({
   async function grantPermission(roommate: Roommate) {
     if (!group) return;
     const permission = await requestRentPermission(group, roommate);
-    onPermissionGranted(roommate.id, permission);
+    await onPermissionGranted(roommate.id, permission);
     pushAssistant("Permission is active. Kvara can now include this wallet in the rent run.");
   }
 
@@ -336,22 +355,23 @@ export function KvaraChatWorkspace({
     const startedAt = Date.now();
     const existingPaymentIds = new Set(history.map((record) => record.id));
     try {
-      const response = await runAgentNow(group);
+      const response = await runAgentNow(group.id);
       onPaymentsUpdated(response.payments);
       setAgentEvents(response.events);
-      setAgentRunning(response.running);
+      setAgentRunning(false);
       pushAssistant(summarizeAgentRun(group, response.payments, response.events, existingPaymentIds, startedAt));
       const taskIds = response.payments
+        .filter((payment) => payment.status === "pending" || payment.status === "submitted" || payment.status === "submission_unknown")
         .map((payment) => payment.taskId)
         .filter((taskId): taskId is string => Boolean(taskId));
       if (taskIds.length > 0) {
         try {
-          const payments = await pollRelayerStatuses(taskIds, onPaymentsUpdated);
+          const payments = await pollPaymentStatuses(group.id, taskIds, onPaymentsUpdated);
           if (payments.length > 0) {
-            pushAssistant(summarizeRelayerStatus(payments));
+            pushAssistant(summarizePaymentStatus(payments));
           }
         } catch {
-          pushAssistant("1Shot accepted the payment task. Transaction status is still pending.");
+          pushAssistant("Base accepted the payment operation. Confirmation is still pending.");
         }
       }
     } catch (cause) {
@@ -361,16 +381,16 @@ export function KvaraChatWorkspace({
     }
   }
 
-  function endLease() {
+  async function endLease() {
     if (!group || !canManageGroup) return;
     const name = group.propertyName;
-    const deleted = onDeleteGroup(group.id);
+    const deleted = await onDeleteGroup(group.id);
     if (!deleted) return;
     setMessages([
       {
         id: createMessageId("assistant"),
         role: "assistant",
-        text: `${name} is closed. Kvara will not run this lease again.`
+        text: `${name} is closed and Kvara autopay is stopped. Your wallet permission was not revoked onchain; remove it in MetaMask if you no longer want it active.`
       }
     ]);
   }
@@ -389,10 +409,10 @@ export function KvaraChatWorkspace({
 
     setAsking(true);
     try {
-      const response = await sendVeniceMessage({ message, group, history });
+      const response = await sendVeniceMessage({ message, groupId: group.id });
       const commandSummary = response.commands.length > 0 ? summarizeRentCommands(group, response.commands) : "";
       if (response.commands.length > 0) {
-        onCommands(response.commands);
+        await onCommands(response.commands, response.group);
       }
       pushAssistant(joinChatSections(response.message, commandSummary));
     } catch (cause) {
@@ -424,7 +444,7 @@ export function KvaraChatWorkspace({
           <div className="flex items-center gap-3">
             <div>
               <p className="text-xl font-semibold leading-none text-stone-950">Kvara</p>
-              <p className="mt-1 text-xs text-stone-500">Autonomous rent desk</p>
+              <p className="mt-1 text-xs text-stone-500">Autonomous rent on Base</p>
             </div>
           </div>
           {account ? (
@@ -486,6 +506,20 @@ export function KvaraChatWorkspace({
               {account && connectError ? (
                 <ActionBubble>
                   <p className="text-sm text-rose-700">{connectError}</p>
+                </ActionBubble>
+              ) : null}
+
+              {account && walletChainId && walletChainId !== BASE_CHAIN_HEX ? (
+                <ActionBubble>
+                  <p className="text-sm text-stone-700">Kvara settles rent in USDC on Base Mainnet.</p>
+                  <button
+                    type="button"
+                    onClick={switchToBase}
+                    className="mt-3 inline-flex h-10 items-center gap-2 bg-emerald-950 px-3 text-sm font-semibold text-white transition hover:bg-emerald-900"
+                  >
+                    <RefreshCw size={15} />
+                    Switch to Base
+                  </button>
                 </ActionBubble>
               ) : null}
 
@@ -561,6 +595,7 @@ export function KvaraChatWorkspace({
           <ApartmentSnapshot
             group={visibleGroup}
             inviteRoommate={inviteRoommate}
+            connectedRoommate={connectedRoommate}
             setupDraft={setupDraft}
             stats={stats}
             history={history}
@@ -931,6 +966,7 @@ function ApartmentActionsBubble({
 function ApartmentSnapshot({
   group,
   inviteRoommate,
+  connectedRoommate,
   setupDraft,
   stats,
   history,
@@ -940,6 +976,7 @@ function ApartmentSnapshot({
 }: {
   group: RentGroup | null;
   inviteRoommate: Roommate | null;
+  connectedRoommate: Roommate | null;
   setupDraft: SetupDraft;
   stats: { granted: number; total: number; monthlyTotal: number };
   history: PaymentRecord[];
@@ -947,6 +984,7 @@ function ApartmentSnapshot({
   canManageGroup: boolean;
   onEndLease: () => void;
 }) {
+  const currentRoommate = connectedRoommate ?? inviteRoommate;
   const hasDraft = Boolean(
     setupDraft.propertyAddress.trim() ||
       setupDraft.landlordAddress.trim() ||
@@ -984,6 +1022,7 @@ function ApartmentSnapshot({
 
       <div className="space-y-4 p-4 text-sm">
         <SnapshotRow label="Place" value={group?.propertyAddress || setupDraft.propertyAddress || "Waiting for address"} />
+        {group ? <SnapshotRow label="Landlord" value={shortAddress(group.landlordAddress)} /> : null}
         <SnapshotRow
           label="Rent day"
           value={
@@ -994,9 +1033,12 @@ function ApartmentSnapshot({
                 : formatDraftRentRun(setupDraft.dueDay, setupDraft.rentRunTime)
           }
         />
-        {inviteRoommate ? <SnapshotRow label="Your part" value={`${formatUsd(inviteRoommate.share)} USDC`} /> : null}
+        {currentRoommate ? <SnapshotRow label="Your part" value={`${formatUsd(currentRoommate.share)} USDC`} /> : null}
+        {group ? <SnapshotRow label="Autopay" value={group.autopayEnabled ? "Active on Base" : "Paused"} /> : null}
         {group ? <SnapshotRow label="Collected this month" value={`${formatUsd(stats.monthlyTotal)} USDC`} /> : null}
       </div>
+
+      {currentRoommate ? <PermissionSnapshot roommate={currentRoommate} /> : null}
 
       {group ? (
         <ResidentsSnapshot roommates={group.roommates} />
@@ -1020,6 +1062,8 @@ function ApartmentSnapshot({
         )}
       </div>
 
+      {history.length > 0 ? <PaymentProofSnapshot history={history} /> : null}
+
       {group && canManageGroup ? (
         <div className="border-t border-stone-300 p-4">
           <button
@@ -1034,6 +1078,77 @@ function ApartmentSnapshot({
       ) : null}
     </aside>
   );
+}
+
+function PermissionSnapshot({ roommate }: { roommate: Roommate }) {
+  const permission = roommate.permission;
+  const status = permissionStatus(roommate);
+  const insufficient = permission
+    ? parseUnitsSafe(roommate.share, permission.tokenDecimals) + BigInt(permission.feeBufferAtoms || "0") > BigInt(permission.allowanceAtoms)
+    : false;
+  return (
+    <div className="border-t border-stone-300 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs font-semibold uppercase text-stone-500">Your permission</p>
+        <span className={status === "granted" && !insufficient ? "text-xs font-semibold uppercase text-emerald-800" : "text-xs font-semibold uppercase text-rose-700"}>
+          {insufficient ? "Needs update" : status === "granted" ? "Active" : status}
+        </span>
+      </div>
+      {permission ? (
+        <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-3 border border-stone-300 bg-white p-3 text-sm">
+          <div><dt className="text-xs text-stone-500">Asset</dt><dd className="mt-1 font-semibold">Base USDC</dd></div>
+          <div><dt className="text-xs text-stone-500">30-day cap</dt><dd className="mt-1 font-semibold">{formatUnits(BigInt(permission.allowanceAtoms), permission.tokenDecimals)} USDC</dd></div>
+          <div><dt className="text-xs text-stone-500">Purpose</dt><dd className="mt-1 font-semibold">Monthly rent</dd></div>
+          <div><dt className="text-xs text-stone-500">Expires</dt><dd className="mt-1 font-semibold">{formatPermissionExpiry(permission.expiresAt)}</dd></div>
+          <div><dt className="text-xs text-stone-500">Execution</dt><dd className="mt-1 font-semibold">{permission.executionMode === "aa" ? "Kvara smart account" : "1Shot relayer"}</dd></div>
+          <div><dt className="text-xs text-stone-500">Settlement</dt><dd className="mt-1 font-semibold">Base Mainnet</dd></div>
+        </dl>
+      ) : (
+        <p className="mt-2 text-sm text-stone-600">Grant a bounded Base USDC permission before rent day.</p>
+      )}
+      {insufficient ? <p className="mt-2 text-sm text-rose-700">Your current share is above this permission cap. Grant a new permission before rent day.</p> : null}
+    </div>
+  );
+}
+
+function PaymentProofSnapshot({ history }: { history: PaymentRecord[] }) {
+  const payments = history.filter((payment) => payment.txHash || payment.basescanUrl).slice(0, 3);
+  if (payments.length === 0) return null;
+  return (
+    <div className="border-t border-stone-300 p-4">
+      <p className="text-xs font-semibold uppercase text-stone-500">Base proof</p>
+      <div className="mt-3 divide-y divide-stone-300 border border-stone-300 bg-white">
+        {payments.map((payment) => (
+          <a
+            key={payment.id}
+            href={payment.basescanUrl ?? `${BASE_EXPLORER_URL}/tx/${payment.txHash}`}
+            target="_blank"
+            rel="noreferrer"
+            className="flex min-h-11 items-center justify-between gap-3 px-3 py-2 text-sm transition hover:bg-stone-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-emerald-800"
+          >
+            <span className="min-w-0">
+              <span className="block truncate font-semibold">{payment.roommateName}</span>
+              <span className="text-xs text-stone-500">{formatUsd(payment.amount)} USDC - {humanPaymentStatus(payment.status)}</span>
+            </span>
+            <ArrowUpRight size={15} className="shrink-0 text-emerald-800" />
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatPermissionExpiry(expiresAt: number): string {
+  return new Date(expiresAt * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function parseUnitsSafe(value: string, decimals: number): bigint {
+  try {
+    const [whole = "0", fraction = ""] = value.split(".");
+    return BigInt(`${whole}${fraction.padEnd(decimals, "0").slice(0, decimals)}`);
+  } catch {
+    return 0n;
+  }
 }
 
 function ResidentsSnapshot({ roommates }: { roommates: Roommate[] }) {
@@ -1174,17 +1289,25 @@ function summarizeAgentRun(
   const submitted = runPayments.filter((payment) => payment.status === "submitted").length;
   const pending = runPayments.filter((payment) => payment.status === "pending").length;
   const confirmed = runPayments.filter((payment) => payment.status === "confirmed").length;
-  const blocked = runPayments.filter((payment) => payment.status === "failed" || payment.status === "rejected");
+  const uncertain = runPayments.filter((payment) => payment.status === "submission_unknown");
+  const blocked = runPayments.filter((payment) => payment.status === "failed" || payment.status === "rejected" || payment.status === "submission_unknown");
   const live = submitted + pending + confirmed;
 
   if (live > 0) {
     const parts = [
-      submitted ? `${submitted} submitted to 1Shot` : "",
+      submitted ? `${submitted} submitted on Base` : "",
       pending ? `${pending} pending` : "",
       confirmed ? `${confirmed} confirmed` : ""
     ].filter(Boolean);
     const blockedText = blocked.length > 0 ? ` ${formatBlockedPayments(blocked)}` : "";
     return joinChatSections(`Rent day started: ${parts.join(", ")}.${blockedText}`, formatPaymentAttempts(runPayments));
+  }
+
+  if (uncertain.length > 0) {
+    return joinChatSections(
+      "Payment submission needs review. Kvara will not retry automatically until the outcome is known.",
+      formatPaymentAttempts(runPayments)
+    );
   }
 
   return joinChatSections(
@@ -1208,8 +1331,8 @@ function formatPaymentAttempts(payments: PaymentRecord[]): string {
   return ["Payment attempts:", ...payments.map((payment) => `- ${formatPaymentLine(payment)}`)].join("\n");
 }
 
-function summarizeRelayerStatus(payments: PaymentRecord[]): string {
-  return ["1Shot status:", ...payments.map((payment) => `- ${formatPaymentLine(payment)}`)].join("\n");
+function summarizePaymentStatus(payments: PaymentRecord[]): string {
+  return ["Base payment status:", ...payments.map((payment) => `- ${formatPaymentLine(payment)}`)].join("\n");
 }
 
 function formatPaymentLine(payment: PaymentRecord): string {
@@ -1221,10 +1344,13 @@ function formatPaymentLine(payment: PaymentRecord): string {
     return `${name}: confirmed ${amount}${explorerUrl ? ` - ${explorerUrl}` : ""}`;
   }
   if (payment.status === "submitted") {
-    return `${name}: submitted ${amount}${explorerUrl ? ` - ${explorerUrl}` : ` - task ${payment.taskId ?? "pending"}`}`;
+    return `${name}: submitted ${amount}${explorerUrl ? ` - ${explorerUrl}` : ` - operation ${shortOperationId(payment.taskId)}`}`;
   }
   if (payment.status === "pending") {
-    return `${name}: pending ${amount}${payment.taskId ? ` - task ${payment.taskId}` : ""}`;
+    return `${name}: pending ${amount}${payment.taskId ? ` - operation ${shortOperationId(payment.taskId)}` : ""}`;
+  }
+  if (payment.status === "submission_unknown") {
+    return `${name}: needs review ${amount} - ${humanPaymentError(payment.error)}`;
   }
   if (payment.status === "rejected") {
     return `${name}: rejected ${amount} - ${humanPaymentError(payment.error)}`;
@@ -1248,7 +1374,8 @@ function joinChatSections(...sections: string[]): string {
   return sections.map((section) => section.trim()).filter(Boolean).join("\n\n");
 }
 
-async function pollRelayerStatuses(
+async function pollPaymentStatuses(
+  groupId: string,
   taskIds: string[],
   onPaymentsUpdated: (records: PaymentRecord[]) => void
 ): Promise<PaymentRecord[]> {
@@ -1256,7 +1383,7 @@ async function pollRelayerStatuses(
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     await wait(attempt === 0 ? 1500 : 3000);
-    const response = await refreshStatuses(taskIds);
+    const response = await refreshStatuses(groupId, taskIds);
     if (response.payments.length > 0) {
       latest = response.payments;
       onPaymentsUpdated(response.payments);
@@ -1268,6 +1395,11 @@ async function pollRelayerStatuses(
   }
 
   return latest;
+}
+
+function shortOperationId(value: string | undefined): string {
+  if (!value) return "pending";
+  return value.length > 14 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
 
 function paymentHasExplorerLink(payment: PaymentRecord): boolean {

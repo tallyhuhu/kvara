@@ -1,105 +1,137 @@
-import type { AgentEvent, PaymentRecord, RentGroup } from "./groupStorage";
+import type { AgentEvent, PaymentRecord, PermissionGrant, RentGroup } from "./groupStorage";
 
 const API_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, "") ?? "";
+const SESSION_PREFIX = "kvara.wallet.session.";
+let activeWallet: `0x${string}` | null = null;
 
-export type CollectResponse = {
-  payments: PaymentRecord[];
+type WalletProvider = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
+type Session = { token: string; expiresAt: string; walletAddress: `0x${string}` };
+export type GroupsResponse = { groups: RentGroup[] };
+export type GroupResponse = { group: RentGroup };
+export type StatusResponse = { payments: PaymentRecord[] };
+export type ExecutionConfigResponse = {
+  chainId: number;
+  tokenAddress: `0x${string}`;
+  mode: "aa" | "one-shot";
+  configured: boolean;
+  executorAddress?: `0x${string}`;
+  paymasterEnabled: boolean;
+  builderAttribution: "absent" | "configured" | "invalid";
 };
-
-export type GroupsResponse = {
-  groups: RentGroup[];
-};
-
-export type GroupResponse = {
-  group: RentGroup;
-};
-
-export type StatusResponse = {
-  payments: PaymentRecord[];
-};
-
-export type AgentRunResponse = {
-  payments: PaymentRecord[];
-  events: AgentEvent[];
-  nextRunAt?: string;
-  running: boolean;
-};
-
 export type AgentStateResponse = {
+  groupId: string;
   events: AgentEvent[];
   payments: PaymentRecord[];
   nextRunAt?: string;
-  running: boolean;
+  autopayEnabled: boolean;
 };
 
-export async function collectAndPay(group: RentGroup): Promise<CollectResponse> {
-  return postJson<CollectResponse>("/api/collect", { group });
-}
-
-export async function fetchGroups(walletAddress?: string): Promise<GroupsResponse> {
-  const path = walletAddress ? `/api/groups?wallet=${encodeURIComponent(walletAddress)}` : "/api/groups";
-  const response = await fetch(`${API_URL}${path}`);
-  const json = (await response.json().catch(() => ({}))) as GroupsResponse & { error?: string };
-  if (!response.ok) throw new Error(json.error ?? `Request failed with ${response.status}`);
-  return json;
-}
-
-export async function fetchGroup(groupId: string): Promise<GroupResponse> {
-  const response = await fetch(`${API_URL}/api/groups/${groupId}`);
-  const json = (await response.json().catch(() => ({}))) as GroupResponse & { error?: string };
-  if (!response.ok) throw new Error(json.error ?? `Request failed with ${response.status}`);
-  return json;
-}
-
-export async function saveGroupRemote(group: RentGroup): Promise<GroupResponse> {
-  return postJson<GroupResponse>("/api/groups", { group });
-}
-
-export async function deleteGroupRemote(groupId: string): Promise<{ ok: true }> {
-  const response = await fetch(`${API_URL}/api/groups/${groupId}`, { method: "DELETE" });
-  const json = (await response.json().catch(() => ({}))) as { ok?: true; error?: string };
-  if (!response.ok) throw new Error(json.error ?? `Request failed with ${response.status}`);
-  return { ok: true };
-}
-
-export async function fetchPayments(groupId: string): Promise<CollectResponse> {
-  const response = await fetch(`${API_URL}/api/groups/${groupId}/payments`);
-  const json = (await response.json().catch(() => ({}))) as CollectResponse & { error?: string };
-  if (!response.ok) throw new Error(json.error ?? `Request failed with ${response.status}`);
-  return json;
-}
-
-export async function runAgentNow(group: RentGroup): Promise<AgentRunResponse> {
-  return postJson<AgentRunResponse>("/api/agent/run", { group });
-}
-
-export async function scheduleAgentGroup(group: RentGroup): Promise<AgentStateResponse> {
-  return postJson<AgentStateResponse>("/api/agent/schedule", { group });
-}
-
-export async function getAgentState(groupId: string): Promise<AgentStateResponse> {
-  const response = await fetch(`${API_URL}/api/agent/${groupId}`);
-  const json = (await response.json().catch(() => ({}))) as AgentStateResponse & { error?: string };
-  if (!response.ok) {
-    throw new Error(json.error ?? `Request failed with ${response.status}`);
-  }
-  return json;
-}
-
-export async function refreshStatuses(taskIds: string[]): Promise<StatusResponse> {
-  return postJson<StatusResponse>("/api/status", { taskIds });
-}
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
+export async function authenticateWallet(walletAddress: `0x${string}`, provider: WalletProvider): Promise<void> {
+  activeWallet = walletAddress;
+  const existing = readSession(walletAddress);
+  if (existing && Date.parse(existing.expiresAt) > Date.now() + 15_000) return;
+  const challengeResult = await publicRequest<{ challenge: { id: string; message: string } }>("/api/auth/challenge", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ walletAddress })
   });
+  const signature = await provider.request({ method: "personal_sign", params: [challengeResult.challenge.message, walletAddress] });
+  if (typeof signature !== "string" || !signature.startsWith("0x")) {
+    throw new Error("MetaMask did not return a valid sign-in signature.");
+  }
+  const session = await publicRequest<Session>("/api/auth/verify", {
+    method: "POST",
+    body: JSON.stringify({
+      challengeId: challengeResult.challenge.id,
+      walletAddress,
+      message: challengeResult.challenge.message,
+      signature
+    })
+  });
+  sessionStorage.setItem(sessionKey(walletAddress), JSON.stringify(session));
+}
 
+export async function fetchExecutionConfig(): Promise<ExecutionConfigResponse> {
+  return publicRequest("/api/execution-config", { method: "GET" });
+}
+
+export function clearWalletSession(walletAddress?: string): void {
+  if (walletAddress) sessionStorage.removeItem(sessionKey(walletAddress));
+  if (!walletAddress || activeWallet?.toLowerCase() === walletAddress.toLowerCase()) activeWallet = null;
+}
+
+export async function fetchGroups(): Promise<GroupsResponse> {
+  return authorizedRequest("/api/groups");
+}
+export async function fetchGroup(groupId: string): Promise<GroupResponse> {
+  return authorizedRequest(`/api/groups/${encodeURIComponent(groupId)}`);
+}
+export async function createGroupRemote(group: RentGroup): Promise<GroupResponse> {
+  return authorizedRequest("/api/groups", { method: "POST", body: JSON.stringify({ group }) });
+}
+export async function updateGroupRemote(group: RentGroup): Promise<GroupResponse> {
+  return authorizedRequest(`/api/groups/${encodeURIComponent(group.id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ group })
+  });
+}
+export async function savePermissionRemote(groupId: string, roommateId: string, permission: PermissionGrant): Promise<GroupResponse> {
+  return authorizedRequest(`/api/groups/${encodeURIComponent(groupId)}/roommates/${encodeURIComponent(roommateId)}/permission`, {
+    method: "PUT",
+    body: JSON.stringify({ permission })
+  });
+}
+export async function deleteGroupRemote(groupId: string): Promise<{ ok: true; revokedOnchain: false }> {
+  return authorizedRequest(`/api/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" });
+}
+export async function fetchPayments(groupId: string): Promise<{ payments: PaymentRecord[] }> {
+  return authorizedRequest(`/api/groups/${encodeURIComponent(groupId)}/payments`);
+}
+export async function runAgentNow(groupId: string): Promise<AgentStateResponse> {
+  return authorizedRequest("/api/agent/run", { method: "POST", body: JSON.stringify({ groupId }) });
+}
+export async function scheduleAgentGroup(groupId: string): Promise<AgentStateResponse> {
+  return authorizedRequest("/api/agent/schedule", { method: "POST", body: JSON.stringify({ groupId }) });
+}
+export async function getAgentState(groupId: string): Promise<AgentStateResponse> {
+  return authorizedRequest(`/api/agent/${encodeURIComponent(groupId)}`);
+}
+export async function refreshStatuses(groupId: string, taskIds: string[]): Promise<StatusResponse> {
+  return authorizedRequest("/api/status", { method: "POST", body: JSON.stringify({ groupId, taskIds }) });
+}
+
+export async function authorizedRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (!activeWallet) throw new Error("Connect and sign in with MetaMask first.");
+  const session = readSession(activeWallet);
+  if (!session) throw new Error("Wallet session expired. Reconnect MetaMask.");
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.token}`, ...init.headers }
+  });
   const json = (await response.json().catch(() => ({}))) as T & { error?: string };
   if (!response.ok) {
+    if (response.status === 401) clearWalletSession(activeWallet);
     throw new Error(json.error ?? `Request failed with ${response.status}`);
   }
   return json;
+}
+
+async function publicRequest<T>(path: string, init: RequestInit): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init.headers }
+  });
+  const json = (await response.json().catch(() => ({}))) as T & { error?: string };
+  if (!response.ok) throw new Error(json.error ?? `Request failed with ${response.status}`);
+  return json;
+}
+function readSession(walletAddress: string): Session | null {
+  try {
+    const value = sessionStorage.getItem(sessionKey(walletAddress));
+    return value ? JSON.parse(value) as Session : null;
+  } catch {
+    return null;
+  }
+}
+function sessionKey(walletAddress: string): string {
+  return `${SESSION_PREFIX}${walletAddress.toLowerCase()}`;
 }

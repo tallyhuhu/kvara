@@ -38,7 +38,7 @@ export function PaymentHistory({ records }: Props) {
                   <td className="px-4 py-3">{formatUsd(record.amount)} USDC</td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-1 text-xs font-semibold uppercase ${statusClass(record.status)}`}>
-                      {record.status}
+                      {statusLabel(record.status)}
                     </span>
                   </td>
                   <td className="px-4 py-3">
@@ -72,4 +72,9 @@ function statusClass(status: PaymentRecord["status"]): string {
   if (status === "confirmed") return "bg-emerald-100 text-emerald-900";
   if (status === "submitted" || status === "pending") return "bg-amber-100 text-amber-900";
   return "bg-rose-100 text-rose-900";
+}
+
+function statusLabel(status: PaymentRecord["status"]): string {
+  if (status === "submission_unknown") return "Needs review";
+  return status;
 }

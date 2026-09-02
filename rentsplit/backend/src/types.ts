@@ -1,5 +1,14 @@
 export type PermissionStatus = "pending" | "granted" | "expired" | "failed";
-export type PaymentStatus = "pending" | "submitted" | "confirmed" | "rejected" | "failed";
+export type PaymentExecutionMode = "aa" | "one-shot";
+export type PaymentStatus =
+  | "scheduled"
+  | "preparing"
+  | "submission_unknown"
+  | "pending"
+  | "submitted"
+  | "confirmed"
+  | "rejected"
+  | "failed";
 
 export type PermissionGrant = {
   status: PermissionStatus;
@@ -13,10 +22,17 @@ export type PermissionGrant = {
   feeBufferAtoms: string;
   tokenAddress: `0x${string}`;
   tokenDecimals: number;
-  relayerTargetAddress: `0x${string}`;
-  feeCollector: `0x${string}`;
+  executionMode?: PaymentExecutionMode;
+  relayerTargetAddress?: `0x${string}`;
+  feeCollector?: `0x${string}`;
+  sessionAccountAddress?: `0x${string}`;
+  delegationManager?: `0x${string}`;
+  dependencies?: Array<{ factory: `0x${string}`; factoryData: `0x${string}` }>;
   grantedAt: number;
   expiresAt: number;
+  landlordAddress?: `0x${string}`;
+  periodSeconds?: number;
+  purpose?: string;
   taskIds?: string[];
   error?: string;
 };
@@ -44,6 +60,8 @@ export type RentGroup = {
   roommates: Roommate[];
   createdAt: number;
   updatedAt: number;
+  scheduleTimeZone?: "UTC";
+  closedAt?: string;
 };
 
 export type PaymentRecord = {
@@ -56,15 +74,43 @@ export type PaymentRecord = {
   date: string;
   status: PaymentStatus;
   taskId?: string;
+  executionMode?: PaymentExecutionMode;
+  userOperationHash?: `0x${string}`;
   txHash?: string;
   basescanUrl?: string;
   error?: string;
+  billingPeriod: string;
+  idempotencyKey: string;
+  attemptCount: number;
+  createdAt: string;
+  updatedAt: string;
+  failureStage?: "validation" | "estimate" | "submission" | "status";
 };
 
 export type AgentEvent = {
   id: string;
   groupId: string;
-  type: "scheduled" | "checked" | "submitted" | "confirmed" | "blocked" | "failed";
+  type: "scheduled" | "checked" | "submitted" | "confirmed" | "blocked" | "failed" | "paused";
   message: string;
   createdAt: string;
+};
+
+export type AuthChallenge = {
+  id: string;
+  walletAddress: `0x${string}`;
+  message: string;
+  expiresAt: string;
+  consumedAt?: string;
+};
+
+export type RentCycleStatus = "running" | "processing" | "completed" | "blocked" | "failed";
+
+export type RentCycle = {
+  groupId: string;
+  billingPeriod: string;
+  status: RentCycleStatus;
+  leaseUntil: string;
+  attemptCount: number;
+  startedAt: string;
+  updatedAt: string;
 };

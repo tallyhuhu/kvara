@@ -1,179 +1,204 @@
-import { collectGroupRent } from "./agent.js";
+import { collectGroupRent, reconcileRelayerTasks } from "./agent.js";
+import { config } from "./config.js";
+import { billingPeriodFor, nextMonthlyRun, normalizeSchedule } from "./domain.js";
+import { logError, logInfo, logWarn } from "./logger.js";
 import {
   appendAgentEvent,
+  claimRentCycle,
   getGroup,
   listAgentEvents,
+  listDueGroups,
   listPayments,
   saveGroup,
-  savePaymentRecords
+  updateRentCycleStatus
 } from "./store.js";
-import type { AgentEvent, PaymentRecord, RentGroup } from "./types.js";
+import type { AgentEvent, PaymentRecord, RentCycleStatus, RentGroup } from "./types.js";
 
-type AgentState = {
+export type AgentState = {
+  groupId: string;
   events: AgentEvent[];
   payments: PaymentRecord[];
   nextRunAt?: string;
-  running: boolean;
+  autopayEnabled: boolean;
 };
 
-const timers = new Map<string, NodeJS.Timeout>();
-const runningGroups = new Set<string>();
+let timer: NodeJS.Timeout | undefined;
+let tickRunning = false;
 
-export async function scheduleGroup(group: RentGroup): Promise<AgentState> {
-  const saved = await saveGroup(normalizeSchedule(group));
-  clearTimer(saved.id);
-
-  if (saved.autopayEnabled && saved.nextRunAt) {
-    const delay = Math.max(0, Date.parse(saved.nextRunAt) - Date.now());
-    const cappedDelay = Math.min(delay, 2_147_483_647);
-    timers.set(
-      saved.id,
-      setTimeout(() => {
-        runScheduledGroup(saved.id).catch(async (cause) => {
-          await appendAgentEvent({
-            groupId: saved.id,
-            type: "failed",
-            message: cause instanceof Error ? cause.message : "Agent run failed"
-          });
-        });
-      }, cappedDelay)
-    );
-    const message = `Next rent run ${formatDate(saved.nextRunAt)}`;
-    const recentEvents = await listAgentEvents(saved.id);
-    if (recentEvents[0]?.type !== "scheduled" || recentEvents[0].message !== message) {
-      await appendAgentEvent({
-        groupId: saved.id,
-        type: "scheduled",
-        message
-      });
-    }
-  }
-
+export async function scheduleGroup(groupOrId: RentGroup | string): Promise<AgentState> {
+  const group = await requireGroup(groupOrId);
+  const scheduled = normalizeSchedule(group);
+  const saved = await saveGroup(scheduled);
+  await appendAgentEvent({
+    groupId: saved.id,
+    type: saved.autopayEnabled ? "scheduled" : "paused",
+    message: saved.autopayEnabled
+      ? `Autopay is scheduled for ${formatUtc(saved.nextRunAt)}.`
+      : "Autopay is paused."
+  });
   return getAgentState(saved.id);
 }
 
-export async function runAgentNow(group: RentGroup): Promise<AgentState> {
-  const saved = await saveGroup(normalizeSchedule(group));
-  await runAgent(saved.id);
-  return getAgentState(saved.id);
+export async function runAgentNow(groupOrId: RentGroup | string): Promise<AgentState> {
+  const group = await requireGroup(groupOrId);
+  await executeCycle(group, new Date(), true);
+  return getAgentState(group.id);
 }
 
 export async function getAgentState(groupId: string): Promise<AgentState> {
+  const group = await getGroup(groupId);
+  if (!group || group.closedAt) throw new Error("Household not found.");
   return {
+    groupId,
     events: await listAgentEvents(groupId),
     payments: await listPayments(groupId),
-    nextRunAt: (await getGroup(groupId))?.nextRunAt,
-    running: runningGroups.has(groupId)
+    nextRunAt: group.nextRunAt,
+    autopayEnabled: Boolean(group.autopayEnabled)
   };
 }
 
-async function runScheduledGroup(groupId: string): Promise<void> {
-  await runAgent(groupId);
+export function startScheduler(): void {
+  if (!config.schedulerEnabled || timer) return;
+  timer = setInterval(() => void schedulerTick(), config.schedulerPollMs);
+  timer.unref();
+  logInfo("scheduler.started", { pollMs: config.schedulerPollMs, leaseMs: config.schedulerLeaseMs });
+  void schedulerTick();
 }
 
-async function runAgent(groupId: string): Promise<void> {
-  if (runningGroups.has(groupId)) return;
-  runningGroups.add(groupId);
-  clearTimer(groupId);
+export function stopScheduler(): void {
+  if (timer) clearInterval(timer);
+  timer = undefined;
+}
+
+async function schedulerTick(): Promise<void> {
+  if (tickRunning) return;
+  tickRunning = true;
+  try {
+    await reconcilePaymentCycles(await reconcileRelayerTasks());
+    const now = new Date();
+    for (const group of await listDueGroups(now)) {
+      await executeCycle(group, now, false);
+    }
+  } catch (cause) {
+    logError("scheduler.tick.failed", cause);
+  } finally {
+    tickRunning = false;
+  }
+}
+
+async function executeCycle(group: RentGroup, now: Date, manual: boolean): Promise<void> {
+  if (group.closedAt) return;
+  if (!manual && !group.autopayEnabled) return;
+
+  const billingPeriod = billingPeriodFor(now);
+  const cycle = await claimRentCycle(group.id, billingPeriod, config.schedulerLeaseMs);
+  if (!cycle) {
+    logInfo("rent.cycle.skipped", { groupId: group.id, billingPeriod, reason: "already claimed" });
+    return;
+  }
+
+  await appendAgentEvent({
+    groupId: group.id,
+    type: "checked",
+    message: `${manual ? "Manual" : "Scheduled"} rent run started for ${billingPeriod}.`
+  });
 
   try {
-    const group = await getGroup(groupId);
-    if (!group) throw new Error("Group not found");
+    const payments = await collectGroupRent(group, billingPeriod);
+    const status = paymentCycleStatus(payments);
+    await updateRentCycleStatus(group.id, billingPeriod, status.cycleStatus);
+    await appendAgentEvent({ groupId: group.id, type: status.eventType, message: status.message });
 
+    if (!manual || Date.parse(group.nextRunAt ?? "") <= now.getTime()) {
+      const nextRunAt = nextMonthlyRun(group.dueDay ?? 1, now, group.rentRunTime ?? "09:00").toISOString();
+      await saveGroup({ ...group, nextRunAt, updatedAt: Date.now() });
+      await appendAgentEvent({
+        groupId: group.id,
+        type: "scheduled",
+        message: `Next automatic rent run is ${formatUtc(nextRunAt)}.`
+      });
+    }
+  } catch (cause) {
+    await updateRentCycleStatus(group.id, billingPeriod, "failed");
     await appendAgentEvent({
-      groupId,
-      type: "checked",
-      message: "Agent checked rent schedule and permissions"
+      groupId: group.id,
+      type: "failed",
+      message: cause instanceof Error ? cause.message : "Rent run failed before payment submission."
     });
-
-    const payments = await collectGroupRent(group);
-    await savePaymentRecords(payments);
-
-    const submitted = payments.filter((payment) => payment.status === "submitted").length;
-    const blocked = payments.filter((payment) => payment.status === "failed" || payment.status === "rejected").length;
-
-    if (submitted > 0) {
-      await appendAgentEvent({
-        groupId,
-        type: "submitted",
-        message: `${submitted} delegated payment${submitted === 1 ? "" : "s"} submitted`
-      });
-    }
-    if (blocked > 0) {
-      await appendAgentEvent({
-        groupId,
-        type: "blocked",
-        message: `${blocked} payment${blocked === 1 ? "" : "s"} blocked by missing permission or relay error`
-      });
-    }
-
-    const nextRunAt = nextMonthlyRun(group.dueDay ?? new Date().getDate(), new Date(), group.rentRunTime).toISOString();
-    await saveGroup({ ...group, nextRunAt, updatedAt: Date.now() });
-    await scheduleGroup({ ...group, nextRunAt, updatedAt: Date.now() });
-  } finally {
-    runningGroups.delete(groupId);
+    logError("rent.cycle.failed", cause, { groupId: group.id, billingPeriod });
   }
 }
 
-function clearTimer(groupId: string): void {
-  const timer = timers.get(groupId);
-  if (timer) windowlessClearTimeout(timer);
-  timers.delete(groupId);
-}
-
-function normalizeSchedule(group: RentGroup): RentGroup {
-  const dueDay = clampDay(group.dueDay ?? new Date().getDate());
-  const rentRunTime = normalizeRentRunTime(group.rentRunTime);
+export function paymentCycleStatus(payments: PaymentRecord[]): {
+  cycleStatus: RentCycleStatus;
+  eventType: AgentEvent["type"];
+  message: string;
+} {
+  const submitted = payments.filter((payment) => ["pending", "submitted", "confirmed"].includes(payment.status));
+  const active = submitted.filter((payment) => payment.status === "pending" || payment.status === "submitted");
+  const uncertain = payments.filter((payment) => payment.status === "submission_unknown");
+  const failed = payments.filter((payment) => ["failed", "rejected"].includes(payment.status));
+  if (uncertain.length > 0) {
+    return {
+      cycleStatus: "processing",
+      eventType: "blocked",
+      message: `${uncertain.length} payment submission outcome${uncertain.length === 1 ? " is" : "s are"} unknown. Automatic retry is disabled.`
+    };
+  }
+  if (submitted.length === 0) {
+    const reasons = failed.map((payment) => `${payment.roommateName}: ${payment.error ?? payment.status}`).join("; ");
+    return { cycleStatus: "blocked", eventType: "blocked", message: `No payments were submitted. ${reasons}`.trim() };
+  }
+  if (failed.length > 0) {
+    logWarn("rent.cycle.partially_blocked", { submitted: submitted.length, blocked: failed.length });
+    return {
+      cycleStatus: active.length > 0 ? "processing" : "blocked",
+      eventType: active.length > 0 ? "submitted" : "blocked",
+      message: `${submitted.length} payment${submitted.length === 1 ? "" : "s"} submitted; ${failed.length} blocked.`
+    };
+  }
+  if (submitted.every((payment) => payment.status === "confirmed")) {
+    return {
+      cycleStatus: "completed",
+      eventType: "confirmed",
+      message: `${submitted.length} payment${submitted.length === 1 ? "" : "s"} confirmed on Base.`
+    };
+  }
   return {
-    ...group,
-    dueDay,
-    rentRunTime,
-    nextRunAt: group.nextRunAt || nextMonthlyRun(dueDay, new Date(), rentRunTime).toISOString(),
-    autopayEnabled: group.autopayEnabled ?? true,
-    permissionBufferPercent: group.permissionBufferPercent ?? 30,
-    updatedAt: Date.now()
+    cycleStatus: "processing",
+    eventType: "submitted",
+    message: `${submitted.length} payment${submitted.length === 1 ? "" : "s"} submitted on Base.`
   };
 }
 
-function nextMonthlyRun(dueDay: number, from = new Date(), rentRunTime = "09:00"): Date {
-  const day = clampDay(dueDay);
-  const [hour, minute] = parseRentRunTime(rentRunTime);
-  const candidate = new Date(from);
-  candidate.setHours(hour, minute, 0, 0);
-  candidate.setDate(Math.min(day, daysInMonth(candidate.getFullYear(), candidate.getMonth())));
-  if (candidate.getTime() <= from.getTime()) {
-    candidate.setMonth(candidate.getMonth() + 1);
-    candidate.setDate(Math.min(day, daysInMonth(candidate.getFullYear(), candidate.getMonth())));
+async function reconcilePaymentCycles(updates: PaymentRecord[]): Promise<void> {
+  const cycles = new Map<string, { groupId: string; billingPeriod: string }>();
+  for (const payment of updates) {
+    cycles.set(`${payment.groupId}:${payment.billingPeriod}`, {
+      groupId: payment.groupId,
+      billingPeriod: payment.billingPeriod
+    });
   }
-  return candidate;
+
+  for (const cycle of cycles.values()) {
+    const payments = (await listPayments(cycle.groupId)).filter(
+      (payment) => payment.billingPeriod === cycle.billingPeriod
+    );
+    const status = paymentCycleStatus(payments);
+    await updateRentCycleStatus(cycle.groupId, cycle.billingPeriod, status.cycleStatus);
+    if (status.cycleStatus === "completed" || status.cycleStatus === "blocked") {
+      await appendAgentEvent({ groupId: cycle.groupId, type: status.eventType, message: status.message });
+    }
+  }
 }
 
-function clampDay(day: number): number {
-  if (!Number.isFinite(day)) return 1;
-  return Math.min(28, Math.max(1, Math.round(day)));
+async function requireGroup(groupOrId: RentGroup | string): Promise<RentGroup> {
+  const group = typeof groupOrId === "string" ? await getGroup(groupOrId) : groupOrId;
+  if (!group || group.closedAt) throw new Error("Household not found.");
+  return group;
 }
 
-function daysInMonth(year: number, month: number): number {
-  return new Date(year, month + 1, 0).getDate();
-}
-
-function normalizeRentRunTime(value: string | undefined): string {
-  if (!value || !/^\d{2}:\d{2}$/.test(value)) return "09:00";
-  const [hour, minute] = parseRentRunTime(value);
-  return `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
-}
-
-function parseRentRunTime(value: string): [number, number] {
-  const [rawHour, rawMinute] = value.split(":");
-  const hour = Math.min(23, Math.max(0, Number(rawHour)));
-  const minute = Math.min(59, Math.max(0, Number(rawMinute)));
-  return [Number.isFinite(hour) ? hour : 9, Number.isFinite(minute) ? minute : 0];
-}
-
-function formatDate(value: string): string {
-  return new Date(value).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
-function windowlessClearTimeout(timer: NodeJS.Timeout): void {
-  clearTimeout(timer);
+function formatUtc(value: string | undefined): string {
+  if (!value) return "not scheduled";
+  return `${new Date(value).toISOString().replace("T", " ").slice(0, 16)} UTC`;
 }

@@ -13,6 +13,8 @@ import {
   type EIP1193Provider
 } from "viem";
 import { base } from "viem/chains";
+import { getFrontendBuilderDataSuffix } from "../lib/baseAttribution";
+import { fetchExecutionConfig } from "../lib/api";
 import {
   BASE_CHAIN_HEX,
   BASE_CHAIN_ID,
@@ -43,7 +45,11 @@ type FeeData = {
 };
 
 type Wallet7715 = {
-  requestExecutionPermissions: (permissions: unknown[]) => Promise<Array<{ context?: unknown }>>;
+  requestExecutionPermissions: (permissions: unknown[]) => Promise<Array<{
+    context?: unknown;
+    dependencies?: Array<{ factory: `0x${string}`; factoryData: `0x${string}` }>;
+    delegationManager?: `0x${string}`;
+  }>>;
   getSupportedExecutionPermissions?: () => Promise<unknown>;
 };
 
@@ -82,37 +88,53 @@ export function useMetaMaskPermissions() {
           throw new Error(`Connected wallet ${account} does not match invite wallet ${roommate.walletAddress}.`);
         }
 
-        setState({ loading: true, account, detail: "Fetching relayer capabilities" });
-        const capabilities = await relayerRpc<RelayerCapabilities>("relayer_getCapabilities", [
-          String(BASE_CHAIN_ID)
-        ]);
-        const chainCaps = capabilities[String(BASE_CHAIN_ID)];
-        if (!chainCaps) throw new Error("1Shot relayer does not report Base mainnet support.");
+        setState({ loading: true, account, detail: "Loading Kvara execution policy" });
+        const execution = await fetchExecutionConfig();
+        if (execution.chainId !== BASE_CHAIN_ID || execution.tokenAddress.toLowerCase() !== USDC_BASE_ADDRESS.toLowerCase()) {
+          throw new Error("Backend execution configuration does not match Base USDC.");
+        }
+        if (!execution.configured) throw new Error("Kvara autonomous execution is not configured yet.");
 
-        const usdc =
-          chainCaps.tokens.find((token) => token.address.toLowerCase() === USDC_BASE_ADDRESS.toLowerCase()) ??
-          chainCaps.tokens.find((token) => token.symbol?.toUpperCase() === "USDC");
-        if (!usdc) throw new Error("1Shot relayer does not accept Base USDC for fees.");
+        let tokenDecimals = 6;
+        let executionTarget: `0x${string}`;
+        let feeBufferAtoms = 0n;
+        let feeCollector: `0x${string}` | undefined;
+        if (execution.mode === "aa") {
+          if (!execution.executorAddress) throw new Error("Kvara smart-account address is unavailable.");
+          executionTarget = execution.executorAddress;
+        } else {
+          setState({ loading: true, account, detail: "Fetching relayer capabilities" });
+          const capabilities = await relayerRpc<RelayerCapabilities>("relayer_getCapabilities", [String(BASE_CHAIN_ID)]);
+          const chainCaps = capabilities[String(BASE_CHAIN_ID)];
+          if (!chainCaps) throw new Error("1Shot relayer does not report Base mainnet support.");
+          const usdc =
+            chainCaps.tokens.find((token) => token.address.toLowerCase() === USDC_BASE_ADDRESS.toLowerCase()) ??
+            chainCaps.tokens.find((token) => token.symbol?.toUpperCase() === "USDC");
+          if (!usdc) throw new Error("1Shot relayer does not accept Base USDC for fees.");
+          const feeData = await relayerRpc<FeeData>("relayer_getFeeData", {
+            chainId: String(BASE_CHAIN_ID), token: usdc.address
+          });
+          tokenDecimals = Number(usdc.decimals);
+          feeBufferAtoms = maxBigInt(
+            parseUnits(FEE_BUFFER_USDC, tokenDecimals),
+            parseRelayerTokenAmount(feeData.minFee, tokenDecimals)
+          );
+          executionTarget = feeData.targetAddress ?? chainCaps.targetAddress;
+          feeCollector = feeData.feeCollector ?? chainCaps.feeCollector;
+        }
 
-        const feeData = await relayerRpc<FeeData>("relayer_getFeeData", {
-          chainId: String(BASE_CHAIN_ID),
-          token: usdc.address
-        });
-
-        const tokenDecimals = Number(usdc.decimals);
         const shareAtoms = parseUnits(roommate.share, tokenDecimals);
         const bufferPercent = group.permissionBufferPercent ?? DEFAULT_PERMISSION_BUFFER_PERCENT;
         const adjustmentBufferAtoms = (shareAtoms * BigInt(Math.max(0, Math.round(bufferPercent)))) / 100n;
-        const minFeeAtoms = parseRelayerTokenAmount(feeData.minFee, tokenDecimals);
-        const feeBufferAtoms = maxBigInt(parseUnits(FEE_BUFFER_USDC, tokenDecimals), minFeeAtoms);
         const allowanceAtoms = shareAtoms + adjustmentBufferAtoms + feeBufferAtoms;
-        const relayerTarget = feeData.targetAddress ?? chainCaps.targetAddress;
 
         setState({ loading: true, account, detail: "Requesting ERC-7715 permission in MetaMask" });
+        const dataSuffix = getFrontendBuilderDataSuffix();
         const walletClient = createWalletClient({
           account: account as Address,
           chain: base,
-          transport: custom(ethereum)
+          transport: custom(ethereum),
+          ...(dataSuffix ? { dataSuffix } : {})
         });
         const wallet7715 = walletClient.extend(erc7715ProviderActions()) as unknown as Wallet7715;
 
@@ -126,17 +148,14 @@ export function useMetaMaskPermissions() {
         const granted = await wallet7715.requestExecutionPermissions([
           {
             chainId: BASE_CHAIN_ID,
-            to: relayerTarget,
+            to: executionTarget,
             permission: {
               type: "erc20-token-periodic",
               data: {
                 tokenAddress: USDC_BASE_ADDRESS,
                 periodAmount: allowanceAtoms,
                 periodDuration: RENT_PERIOD_SECONDS,
-                justification: `Kvara rent agent: ${formatUnits(
-                  shareAtoms,
-                  tokenDecimals
-                )} USDC share plus ${bufferPercent}% adjustment buffer and relayer fee`
+                justification: `Kvara rent agent: ${formatUnits(shareAtoms, tokenDecimals)} USDC share plus ${bufferPercent}% adjustment buffer${execution.mode === "one-shot" ? " and relayer fee" : ""}`
               },
               isAdjustmentAllowed: false
             },
@@ -146,6 +165,9 @@ export function useMetaMaskPermissions() {
 
         const rawContext = granted[0]?.context;
         if (!rawContext) throw new Error("MetaMask did not return a permission context.");
+        if (execution.mode === "aa" && !granted[0]?.delegationManager) {
+          throw new Error("MetaMask did not return a delegation manager for smart-account execution.");
+        }
 
         const permissionContext = decodeDelegations(rawContext as Parameters<typeof decodeDelegations>[0]).map(
           (delegation) => toRelayerJson(delegation)
@@ -162,10 +184,19 @@ export function useMetaMaskPermissions() {
           feeBufferAtoms: feeBufferAtoms.toString(),
           tokenAddress: USDC_BASE_ADDRESS,
           tokenDecimals,
-          relayerTargetAddress: relayerTarget,
-          feeCollector: feeData.feeCollector ?? chainCaps.feeCollector,
+          executionMode: execution.mode,
+          ...(execution.mode === "aa"
+            ? {
+                sessionAccountAddress: executionTarget,
+                delegationManager: granted[0]?.delegationManager,
+                dependencies: granted[0]?.dependencies ?? []
+              }
+            : { relayerTargetAddress: executionTarget, feeCollector }),
           grantedAt: Math.floor(Date.now() / 1000),
-          expiresAt: Math.floor(Date.now() / 1000) + RENT_PERIOD_SECONDS * 12
+          expiresAt: Math.floor(Date.now() / 1000) + RENT_PERIOD_SECONDS * 12,
+          landlordAddress: group.landlordAddress,
+          periodSeconds: RENT_PERIOD_SECONDS,
+          purpose: `Monthly rent for ${group.propertyName}`
         };
 
         setState({
