@@ -17,6 +17,7 @@ import {
   type KvaraProfileRole
 } from "../lib/profileRegistry";
 import { BASE_EXPLORER_URL, BASE_RPC_URL } from "../lib/groupStorage";
+import { readConfirmedProfile } from "../lib/profileConfirmation";
 
 type ProfileState = {
   wallet?: string;
@@ -40,12 +41,13 @@ export function useKvaraProfile(account: `0x${string}` | null) {
     []
   );
 
-  const loadProfile = useCallback(async (walletAddress: `0x${string}`) => {
+  const loadProfile = useCallback(async (walletAddress: `0x${string}`, blockNumber?: bigint) => {
     const chainRole = await publicClient.readContract({
       address: KVARA_PROFILE_REGISTRY_ADDRESS,
       abi: KVARA_PROFILE_REGISTRY_ABI,
       functionName: "profileOf",
-      args: [walletAddress]
+      args: [walletAddress],
+      ...(blockNumber === undefined ? { blockTag: "latest" as const } : { blockNumber })
     });
     return profileRoleFromChain(Number(chainRole));
   }, [publicClient]);
@@ -87,41 +89,47 @@ export function useKvaraProfile(account: `0x${string}` | null) {
     try {
       const [selected] = await ethereum.request({ method: "eth_accounts" }) as string[];
       if (selected?.toLowerCase() !== account.toLowerCase()) throw new Error("Switch back to the selected wallet before creating your profile.");
-      const existing = await loadProfile(account);
+      const existing = pending.current.has(account.toLowerCase()) ? null : await loadProfile(account);
       if (existing) {
         if (accountRef.current === account) setState({ wallet: account, checked: true, loading: false, submitting: false, role: existing });
         return { role: existing, txHash: undefined, basescanUrl: `${BASE_EXPLORER_URL}/address/${account}` };
       }
-      const callData = appendFrontendBuilderAttribution(encodeFunctionData({
-        abi: KVARA_PROFILE_REGISTRY_ABI,
-        functionName: "setProfile",
-        args: [profileRoleToChain(role)]
-      }));
-      await publicClient.call({
-        account,
-        to: KVARA_PROFILE_REGISTRY_ADDRESS,
-        data: callData
-      });
-      const walletClient = createWalletClient({
-        account,
-        chain: base,
-        transport: custom(ethereum)
-      });
-      const txHash = pending.current.get(account.toLowerCase()) ?? await walletClient.sendTransaction({
-        account,
-        to: KVARA_PROFILE_REGISTRY_ADDRESS,
-        data: callData
-      });
-      pending.current.set(account.toLowerCase(), txHash);
+      let txHash = pending.current.get(account.toLowerCase());
+      if (!txHash) {
+        const callData = appendFrontendBuilderAttribution(encodeFunctionData({
+          abi: KVARA_PROFILE_REGISTRY_ABI,
+          functionName: "setProfile",
+          args: [profileRoleToChain(role)]
+        }));
+        await publicClient.call({
+          account,
+          to: KVARA_PROFILE_REGISTRY_ADDRESS,
+          data: callData
+        });
+        const walletClient = createWalletClient({
+          account,
+          chain: base,
+          transport: custom(ethereum)
+        });
+        txHash = await walletClient.sendTransaction({
+          account,
+          to: KVARA_PROFILE_REGISTRY_ADDRESS,
+          data: callData
+        });
+        pending.current.set(account.toLowerCase(), txHash);
+      }
       if (accountRef.current === account) setState((current) => ({ ...current, txHash }));
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120000 });
-      pending.current.delete(account.toLowerCase());
       if (receipt.status !== "success") {
+        pending.current.delete(account.toLowerCase());
         if (accountRef.current === account) setState((current) => ({ ...current, txHash: undefined }));
         throw new Error("Base profile transaction reverted. Choose your role to try again.");
       }
-      const savedRole = await loadProfile(account);
-      if (!savedRole) throw new Error("Base confirmed the transaction, but the profile role did not update.");
+      txHash = receipt.transactionHash;
+      pending.current.set(account.toLowerCase(), txHash);
+      if (accountRef.current === account) setState((current) => ({ ...current, txHash }));
+      const savedRole = await readConfirmedProfile((blockNumber) => loadProfile(account, blockNumber), receipt.blockNumber);
+      pending.current.delete(account.toLowerCase());
       if (accountRef.current?.toLowerCase() === account.toLowerCase()) {
         setState({ wallet: account, checked: true, loading: false, submitting: false, role: savedRole, txHash });
       }
