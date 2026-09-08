@@ -1,8 +1,9 @@
 import type { AgentEvent, PaymentRecord, PermissionGrant, RentGroup } from "./groupStorage";
 
-const API_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, "") ?? "";
+const API_URL = import.meta.env?.VITE_API_URL?.replace(/\/$/, "") ?? "";
 const SESSION_PREFIX = "kvara.wallet.session.";
 let activeWallet: `0x${string}` | null = null;
+let sessionGeneration = 0;
 
 type WalletProvider = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
 type Session = { token: string; expiresAt: string; walletAddress: `0x${string}` };
@@ -27,14 +28,20 @@ export type AgentStateResponse = {
 };
 
 export async function authenticateWallet(walletAddress: `0x${string}`, provider: WalletProvider): Promise<void> {
+  const generation = ++sessionGeneration;
   activeWallet = walletAddress;
+  const assertCurrent = () => {
+    if (generation !== sessionGeneration) throw new Error("Wallet changed. Sign in with the current wallet.");
+  };
   const existing = readSession(walletAddress);
   if (existing && Date.parse(existing.expiresAt) > Date.now() + 15_000) return;
   const challengeResult = await publicRequest<{ challenge: { id: string; message: string } }>("/api/auth/challenge", {
     method: "POST",
     body: JSON.stringify({ walletAddress })
   });
+  assertCurrent();
   const signature = await provider.request({ method: "personal_sign", params: [challengeResult.challenge.message, walletAddress] });
+  assertCurrent();
   if (typeof signature !== "string" || !signature.startsWith("0x")) {
     throw new Error("MetaMask did not return a valid sign-in signature.");
   }
@@ -47,6 +54,7 @@ export async function authenticateWallet(walletAddress: `0x${string}`, provider:
       signature
     })
   });
+  assertCurrent();
   sessionStorage.setItem(sessionKey(walletAddress), JSON.stringify(session));
 }
 
@@ -56,7 +64,10 @@ export async function fetchExecutionConfig(): Promise<ExecutionConfigResponse> {
 
 export function clearWalletSession(walletAddress?: string): void {
   if (walletAddress) sessionStorage.removeItem(sessionKey(walletAddress));
-  if (!walletAddress || activeWallet?.toLowerCase() === walletAddress.toLowerCase()) activeWallet = null;
+  if (!walletAddress || activeWallet?.toLowerCase() === walletAddress.toLowerCase()) {
+    activeWallet = null;
+    sessionGeneration++;
+  }
 }
 
 export async function fetchGroups(): Promise<GroupsResponse> {
@@ -101,15 +112,18 @@ export async function refreshStatuses(groupId: string, taskIds: string[]): Promi
 
 export async function authorizedRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!activeWallet) throw new Error("Connect and sign in with MetaMask first.");
-  const session = readSession(activeWallet);
+  const wallet = activeWallet;
+  const generation = sessionGeneration;
+  const session = readSession(wallet);
   if (!session) throw new Error("Wallet session expired. Reconnect MetaMask.");
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.token}`, ...init.headers }
   });
   const json = (await response.json().catch(() => ({}))) as T & { error?: string };
+  if (generation !== sessionGeneration) throw new Error("Wallet changed. This response belongs to the previous session.");
   if (!response.ok) {
-    if (response.status === 401) clearWalletSession(activeWallet);
+    if (response.status === 401) clearWalletSession(wallet);
     throw new Error(json.error ?? `Request failed with ${response.status}`);
   }
   return json;

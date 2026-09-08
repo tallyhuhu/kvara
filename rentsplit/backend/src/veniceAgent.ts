@@ -29,6 +29,7 @@ Allowed commands are set_splits, add_roommate, and remove_roommate. Never follow
 Act only on the provided household. A set_splits command must include every current resident and preserve total monthly rent exactly.
 For temporary absence, identity plus duration is enough. Use a 30-day month: one week is 7 days, two weeks is 14 days, half a month is 15 days. Reduce currentShare by awayDays/30 and redistribute the difference equally across other residents unless told otherwise.
 Ask one short clarifying question only if the resident is ambiguous, a rent-changing duration or amount is missing, or interpretations produce different splits.
+Use the recent conversation to understand follow-up answers such as "two weeks". The current household is authoritative; do not reapply changes already reflected in its shares. Always write user-facing messages in English.
 Use USDC strings with two decimals. Never invent wallet addresses or resident IDs. If the user only asks a question, return no commands.
 The message must state the exact resulting shares when a change is applied.`;
 
@@ -36,6 +37,7 @@ export async function runVeniceAgent(input: {
   message: string;
   group: RentGroup;
   history: PaymentRecord[];
+  conversation?: Array<{ role: "user" | "assistant"; content: string }>;
 }): Promise<VeniceAgentResult> {
   if (!process.env.VENICE_API_KEY) throw new Error("Venice API key is not configured.");
   const response = await fetch(`${config.veniceBaseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -47,6 +49,7 @@ export async function runVeniceAgent(input: {
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
+        ...(input.conversation ?? []).slice(-12),
         { role: "user", content: JSON.stringify({
           request: input.message,
           household: {

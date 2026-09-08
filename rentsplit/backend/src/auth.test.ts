@@ -35,3 +35,16 @@ test("rejects a signature from a different wallet", async () => {
     signature
   }), /invalid/);
 });
+
+test("rejects a modified message so domain, URI, nonce, and expiry stay bound to the challenge", async () => {
+  const account = privateKeyToAccount(generatePrivateKey());
+  const challenge = await issueAuthChallenge(account.address);
+  const modifiedMessage = challenge.message.replace("Sign in to Kvara.", "Sign in somewhere else.");
+  const signature = await account.signMessage({ message: modifiedMessage });
+  await assert.rejects(() => verifyAuthChallenge({
+    challengeId: challenge.id,
+    walletAddress: account.address,
+    message: modifiedMessage,
+    signature
+  }), /does not match/);
+});

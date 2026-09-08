@@ -18,18 +18,20 @@ Base is the settlement rail rather than an optional network:
 
 ## Product Flow
 
-1. The household admin signs in with a wallet and creates a home with landlord, residents, rent shares, and schedule.
-2. Each resident opens an invite and grants a bounded `erc20-token-periodic` permission through MetaMask Smart Accounts Kit.
-3. The Postgres-backed scheduler claims the monthly rent cycle and reserves one logical payment per resident.
-4. Kvara redeems the permission through an attributed ERC-4337 UserOperation. Existing 1Shot-targeted permissions remain supported by the legacy adapter.
-5. Payment state moves from preparing to submitted/pending and then confirmed or rejected; an unknown submission outcome is never retried automatically, and confirmed transactions link to Basescan.
-6. Venice converts natural-language household changes into structured commands. The backend validates exact totals and authorization before applying them.
+1. Every new wallet creates a one-time `Resident`, `Landlord`, or combined profile on Base. The wallet sends this useful onchain action itself with Kvara's Builder Code, preserving per-wallet attribution.
+2. The household admin signs in with a wallet and creates a home with landlord, residents, rent shares, and schedule.
+3. Each resident opens an invite and grants a bounded `erc20-token-periodic` permission through MetaMask Smart Accounts Kit.
+4. The Postgres-backed scheduler claims the monthly rent cycle and reserves one logical payment per resident.
+5. Kvara redeems the permission through an attributed ERC-4337 UserOperation. Existing 1Shot-targeted permissions remain supported by the legacy adapter.
+6. Payment state moves from preparing to submitted/pending and then confirmed or rejected; an unknown submission outcome is never retried automatically, and confirmed transactions link to Basescan.
+7. Venice converts natural-language household changes into structured commands. The backend validates exact totals and authorization before applying them.
 
 ## Architecture
 
 ```text
 React + Vite (Vercel)
-  | wallet signature session + ERC-7715 permission
+  | attributed onchain profile + wallet signature session + ERC-7715 permission
+  |-- KvaraProfileRegistry: wallet -> Resident / Landlord / Both
   v
 Express API (Railway)
   |-- Postgres: households, challenges, cycles, payments, operation IDs
@@ -63,7 +65,11 @@ VITE_BASE_BUILDER_CODE=your-real-code
 BASE_BUILDER_CODE=your-real-code
 ```
 
-Kvara uses `ox/erc8021` `Attribution.toDataSuffix` through centralized frontend/backend helpers. Missing or malformed values produce no suffix and do not break local development. Viem wallet and Bundler clients are configured at client level when a valid code exists.
+Kvara uses `ox/erc8021` `Attribution.toDataSuffix` through centralized frontend/backend helpers. The frontend defaults to Kvara's registered code; an explicitly empty or malformed value blocks profile submission rather than creating an unattributed profile. The backend reports missing attribution in its health response, so configure its code explicitly. Viem wallet and Bundler clients are configured at client level when a valid code exists.
+
+**Per-wallet attribution:** after connecting, each wallet calls `setProfile` on `KvaraProfileRegistry` in its own Base transaction. Kvara appends the Builder Code directly to that contract calldata, waits for confirmation, reads the saved role back onchain, and exposes the Basescan proof in chat. Autonomous rent still uses the shared executor, while onboarding now attributes every actual wallet separately.
+
+Profile registry on Base Mainnet: [`0x49ab431ebeca10baa558c8513fcaa69d2827e070`](https://basescan.org/address/0x49ab431ebeca10baa558c8513fcaa69d2827e070)
 
 **Exact autonomous payment status:** a rent payment executed in `PAYMENT_EXECUTION_MODE=aa` carries Kvara's Builder Code in the UserOperation calldata when `BASE_BUILDER_CODE` is valid. This is the primary path for new permissions and is compatible with Base.dev's current AA transaction analytics. The documented 1Shot request schema still does not expose outer `dataSuffix` customization, so legacy 1Shot payments are not claimed as attributed. Kvara never appends bytes to ERC20 inner calldata, permission contexts, delegation hashes, or signed permission data.
 
@@ -71,9 +77,13 @@ Permissions are executor-bound. After switching from `one-shot` to `aa`, residen
 
 ## Base Mainnet Proof
 
-Existing verified Kvara execution:
+Profile registry deployment with Builder attribution:
 
-https://basescan.org/tx/0x56add80d8932718a3611980e5c5a450e89db6542473328ef8371d7a843a84e05
+https://basescan.org/tx/0xfc97a5e25440ad0071390cfb6e0b2698039538b37496e6a37752348650a3e009
+
+Confirmed autonomous delegated rent payment with Builder attribution:
+
+https://basescan.org/tx/0x00c2b781c3df52d645af8b6d0afdfc33d0d7fd3fee4169fc3dafcff547d5a779
 
 This repository does not fabricate transaction volume, users, or settlement metrics.
 
@@ -123,24 +133,28 @@ Verification:
 npm test
 npm run typecheck
 npm run build
+npm run compile:profile
 ```
 
 Tests are deterministic and do not call Base Mainnet or spend funds.
 
 ## Deployment
 
+Use the exact service settings and first-launch checks in [DEPLOYMENT.md](rentsplit/DEPLOYMENT.md).
+
 1. Deploy `rentsplit/frontend` to Vercel and set the public variables above.
-2. Deploy `rentsplit/backend` to Railway, attach Postgres, and set backend variables.
+2. Deploy the backend with Railway Root Directory `/rentsplit` and Config File `/rentsplit/railway.json`. This retains the shared lockfile and builds only the backend workspace. Attach Postgres and set backend variables.
 3. First boot with `SCHEDULER_ENABLED=false`; review existing active households and their due dates before allowing autonomous execution.
 4. Redeploy the backend after adding auth variables; startup creates additive tables/indexes automatically.
 5. Confirm `/api/health`, wallet sign-in, an invite, permission display, and the derived AA executor address. Then set `SCHEDULER_ENABLED=true` on the worker-capable API service. Multiple instances are protected by Postgres leases and payment uniqueness.
-6. For a Base.dev test, grant a fresh `aa` permission, run one real payment, wait for confirmation, and verify the final input suffix on Basescan and the count under Base.dev **Onchain > Total Transactions**. Portal analytics can lag behind the block explorer.
+6. Connect a fresh wallet and create its Base profile. Verify the profile transaction and the new unique user in Base.dev; portal analytics can lag behind the block explorer.
+7. Grant a fresh `aa` permission, run one real payment, wait for confirmation, and verify the final UserOperation suffix and payment link.
 
 An always-on process is needed for exact-time execution. If hosting suspends the service, persisted due groups are recovered on wake, but payment cannot run while no process is executing.
 
 ## Current Status
 
-Shipped: Base Mainnet USDC permission flow, attributed AA redemption, legacy 1Shot redemption, signed wallet sessions, household roles, durable schedules, duplicate-payment protection, persisted operation reconciliation, validated Venice changes, transaction proof, and Base app verification metadata.
+Shipped: attributed per-wallet Base profiles, Base Mainnet USDC permission flow, attributed AA redemption, legacy 1Shot redemption, signed wallet sessions, household roles, durable schedules, duplicate-payment protection, persisted operation reconciliation, validated Venice changes, transaction proof, and Base app verification metadata.
 
 Not shipped: wallet-native onchain revocation from Kvara, 1Shot outer-transaction Builder attribution, external alerting, and production load/chaos testing.
 

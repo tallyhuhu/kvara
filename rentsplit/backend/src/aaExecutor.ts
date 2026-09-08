@@ -12,6 +12,8 @@ import { reservePaymentAttempt, savePaymentRecord } from "./store.js";
 import type { PaymentRecord, PermissionGrant, RentGroup, Roommate } from "./types.js";
 
 type AaContext = Awaited<ReturnType<typeof createAaContext>>;
+const FIRST_DEPLOYMENT_VERIFICATION_GAS_LIMIT = 600_000n;
+
 export type AaOperationReceipt = {
   success: boolean;
   reason?: string;
@@ -68,6 +70,9 @@ export async function submitAaPayment(input: {
       failureStage: "submission"
     });
     submissionStarted = true;
+    const verificationGasLimit = (await sessionAccount.isDeployed())
+      ? undefined
+      : FIRST_DEPLOYMENT_VERIFICATION_GAS_LIMIT;
     const userOperationHash = await bundlerClient.sendUserOperationWithDelegation({
       publicClient: publicClient as never,
       account: sessionAccount,
@@ -77,7 +82,8 @@ export async function submitAaPayment(input: {
         permissionContext: permission.rawContext as Hex,
         delegationManager: permission.delegationManager
       }],
-      dependencies: permission.dependencies
+      dependencies: permission.dependencies,
+      ...(verificationGasLimit ? { verificationGasLimit } : {})
     });
 
     const submitted = await savePaymentRecord({
@@ -100,12 +106,13 @@ export async function submitAaPayment(input: {
     return submitted;
   } catch (cause) {
     const stage = cause instanceof AaPaymentError ? cause.stage : submissionStarted ? "submission" : "estimate";
+    const submissionOutcomeUnknown = submissionStarted && isAmbiguousAaSubmissionError(cause);
     logError("aa.payment.failed", cause, { groupId: group.id, paymentId: reservation.payment.id, billingPeriod, stage });
     return savePaymentRecord({
       ...reservation.payment,
       executionMode: "aa",
-      status: submissionStarted ? "submission_unknown" : "failed",
-      error: submissionStarted
+      status: submissionOutcomeUnknown ? "submission_unknown" : "failed",
+      error: submissionOutcomeUnknown
         ? "The smart-account submission outcome is unknown. Automatic retry is disabled to prevent a duplicate payment."
         : cause instanceof Error ? cause.message : "Smart-account execution failed.",
       failureStage: stage
@@ -190,6 +197,20 @@ async function createAaContext() {
 function isReceiptPending(cause: unknown): boolean {
   if (!(cause instanceof Error)) return false;
   return cause.name.includes("UserOperationReceiptNotFound") || /not found|could not be found/i.test(cause.message);
+}
+
+export function isAmbiguousAaSubmissionError(cause: unknown): boolean {
+  const errors: Error[] = [];
+  let current = cause;
+  while (current instanceof Error && !errors.includes(current)) {
+    errors.push(current);
+    current = current.cause;
+  }
+
+  return errors.some((error) =>
+    /HttpRequestError|TimeoutError|AbortError/i.test(error.name) ||
+    /fetch failed|timed? out|timeout|ECONNRESET|ECONNABORTED|socket hang up|connection (?:was )?closed|network request failed/i.test(error.message)
+  );
 }
 
 class AaPaymentError extends Error {

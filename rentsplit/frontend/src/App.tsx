@@ -16,6 +16,7 @@ export default function App() {
     updateRoommatePermission,
     deleteGroup,
     loadGroupsForWallet,
+    resetWallet,
     inviteRoommate,
     isInvite,
     history,
@@ -54,6 +55,7 @@ export default function App() {
           onPermissionGranted={updateRoommatePermission}
           onDeleteGroup={deleteGroup}
           onWalletConnected={loadGroupsForWallet}
+          onWalletDisconnected={resetWallet}
           onPaymentsUpdated={mergePaymentRecords}
           onCommands={applyCommands}
         />
@@ -77,6 +79,7 @@ export default function App() {
         onPermissionGranted={updateRoommatePermission}
         onDeleteGroup={deleteGroup}
         onWalletConnected={loadGroupsForWallet}
+        onWalletDisconnected={resetWallet}
         onPaymentsUpdated={mergePaymentRecords}
         onCommands={applyCommands}
       />

@@ -14,7 +14,7 @@ import { assertProductionConfig, BASE_CHAIN_ID, USDC_BASE_ADDRESS, config } from
 import { applyRentCommands, isGroupAdmin, isGroupMember, validateGroupForSave } from "./domain.js";
 import { logError, logInfo } from "./logger.js";
 import { getAgentState, runAgentNow, scheduleGroup, startScheduler } from "./scheduler.js";
-import { closeGroup, createGroup, getGroup, initStore, listGroups, listPayments, saveGroup, storeMode } from "./store.js";
+import { closeGroup, createGroup, getGroup, GroupChangedError, initStore, listGroups, listPayments, saveGroupIfUnchanged, storeMode } from "./store.js";
 import type { PermissionGrant, RentGroup } from "./types.js";
 import { runVeniceAgent } from "./veniceAgent.js";
 
@@ -114,9 +114,6 @@ app.post("/api/groups", asyncRoute(async (req, res) => {
   const group = validateGroupForSave({ ...body, id: randomUUID(), adminWalletAddress: wallet,
     roommates: body.roommates.map((roommate) => ({ ...roommate, id: randomUUID(), permission: undefined })),
     createdAt: now, updatedAt: now } as RentGroup);
-  if (!group.roommates.some((roommate) => roommate.walletAddress.toLowerCase() === wallet.toLowerCase())) {
-    throw new HttpError(400, "The household admin must be included as a resident.");
-  }
   const saved = await createGroup(group);
   if (saved.autopayEnabled) await scheduleGroup(saved.id);
   res.status(201).json({ group: (await getGroup(saved.id)) ?? saved });
@@ -136,7 +133,7 @@ app.put("/api/groups/:groupId", asyncRoute(async (req, res) => {
       return { ...roommate, permission };
     }),
     updatedAt: Date.now() } as RentGroup);
-  res.json({ group: await saveGroup(next) });
+  res.json({ group: await saveGroupIfUnchanged(current, next) });
 }));
 app.put("/api/groups/:groupId/roommates/:roommateId/permission", asyncRoute(async (req, res) => {
   const wallet = authenticatedWallet(req);
@@ -157,7 +154,7 @@ app.put("/api/groups/:groupId/roommates/:roommateId/permission", asyncRoute(asyn
   } else if (!permission.relayerTargetAddress || !permission.feeCollector) {
     throw new HttpError(400, "1Shot permission is missing relayer execution data.");
   }
-  const saved = await saveGroup({ ...group,
+  const saved = await saveGroupIfUnchanged(group, { ...group,
     roommates: group.roommates.map((item) => item.id === roommate.id ? { ...item, permission } : item), updatedAt: Date.now() });
   res.json({ group: saved });
 }));
@@ -197,10 +194,12 @@ app.get("/api/agent/:groupId", asyncRoute(async (req, res) => {
   res.json(await getAgentState(groupId));
 }));
 app.post("/api/venice/chat", agentLimiter, asyncRoute(async (req, res) => {
-  const input = z.object({ groupId: z.string().min(1), message: z.string().trim().min(1).max(2_000) }).parse(req.body);
+  const input = z.object({ groupId: z.string().min(1), message: z.string().trim().min(1).max(2_000),
+    conversation: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(2_000) })).max(12).optional()
+  }).parse(req.body);
   const group = await requireAdminGroup(input.groupId, authenticatedWallet(req));
-  const result = await runVeniceAgent({ message: input.message, group, history: await listPayments(group.id) });
-  const updatedGroup = result.commands.length ? await saveGroup(applyRentCommands(group, result.commands)) : group;
+  const result = await runVeniceAgent({ message: input.message, group, history: await listPayments(group.id), conversation: input.conversation });
+  const updatedGroup = result.commands.length ? await saveGroupIfUnchanged(group, applyRentCommands(group, result.commands)) : await requireAdminGroup(input.groupId, authenticatedWallet(req));
   res.json({ ...result, group: updatedGroup });
 }));
 
@@ -208,6 +207,7 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   if (error instanceof z.ZodError) return void res.status(400).json({ error: error.issues[0]?.message ?? "Invalid request." });
   if (error instanceof HttpError) return void res.status(error.status).json({ error: error.message });
   if (error instanceof AuthError) return void res.status(401).json({ error: error.message });
+  if (error instanceof GroupChangedError) return void res.status(409).json({ error: error.message });
   logError("http.request.failed", error);
   res.status(500).json({ error: "The request could not be completed." });
 });

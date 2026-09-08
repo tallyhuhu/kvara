@@ -71,3 +71,20 @@ test("rejects permissions whose policy snapshot no longer matches", () => {
   assert.match(validatePermissionForPayment({ ...group(), landlordAddress: roommate }, group().roommates[0], permission, relayer) ?? "", /Landlord changed/);
   assert.match(validatePermissionForPayment(group(), { ...group().roommates[0], share: "90.00" }, permission, relayer) ?? "", /exceeds/);
 });
+
+test("rejects expired, wrong-wallet, wrong-token, wrong-target, and wrong-period permissions", () => {
+  const permission: PermissionGrant = {
+    status: "granted", walletAddress: admin, permissionContext: [{}], rawContext: "0x01",
+    allowanceAtoms: "80000000", shareAtoms: "50000000", feeBufferAtoms: "5000000",
+    tokenAddress: USDC_BASE_ADDRESS, tokenDecimals: 6, relayerTargetAddress: relayer,
+    feeCollector: relayer, grantedAt: 1, expiresAt: Math.floor(Date.now() / 1000) + 1000,
+    landlordAddress: landlord, periodSeconds: RENT_PERIOD_SECONDS
+  };
+  const resident = group().roommates[0];
+
+  assert.match(validatePermissionForPayment(group(), resident, { ...permission, expiresAt: 1 }, relayer) ?? "", /expired/);
+  assert.match(validatePermissionForPayment(group(), resident, { ...permission, walletAddress: roommate }, relayer) ?? "", /wallet/);
+  assert.match(validatePermissionForPayment(group(), resident, { ...permission, tokenAddress: roommate }, relayer) ?? "", /Base USDC/);
+  assert.match(validatePermissionForPayment(group(), resident, permission, roommate) ?? "", /different execution account/);
+  assert.match(validatePermissionForPayment(group(), resident, { ...permission, periodSeconds: RENT_PERIOD_SECONDS - 1 }, relayer) ?? "", /period/);
+});

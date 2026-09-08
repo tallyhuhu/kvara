@@ -150,11 +150,60 @@ export async function saveGroup(group: RentGroup): Promise<RentGroup> {
   return next;
 }
 
+export class GroupChangedError extends Error {
+  constructor() { super("This lease changed while your request was processing. Refresh the page and try again."); }
+}
+
+export async function saveGroupIfUnchanged(expected: RentGroup, group: RentGroup): Promise<RentGroup> {
+  const next = { ...group, id: expected.id, updatedAt: Date.now() };
+  if (!pool) {
+    const current = memory.groups.get(expected.id);
+    if (!current || current.closedAt || JSON.stringify(current) !== JSON.stringify(expected)) throw new GroupChangedError();
+    memory.groups.set(expected.id, next);
+    return next;
+  }
+  await initStore();
+  const result = await pool.query<{ payload: RentGroup }>(
+    `update rent_groups set payload = $3::jsonb, updated_at = now()
+     where id = $1 and payload = $2::jsonb and payload->>'closedAt' is null returning payload`,
+    [expected.id, JSON.stringify(expected), JSON.stringify(next)]
+  );
+  if (!result.rows[0]) throw new GroupChangedError();
+  return result.rows[0].payload;
+}
+
 export async function closeGroup(groupId: string): Promise<boolean> {
-  const group = await getGroup(groupId);
-  if (!group) return false;
-  await saveGroup({ ...group, autopayEnabled: false, closedAt: new Date().toISOString(), updatedAt: Date.now() });
-  return true;
+  const patch = { autopayEnabled: false, closedAt: new Date().toISOString(), updatedAt: Date.now() };
+  if (!pool) {
+    const group = memory.groups.get(groupId);
+    if (!group) return false;
+    memory.groups.set(groupId, { ...group, ...patch });
+    return true;
+  }
+  await initStore();
+  const result = await pool.query(
+    "update rent_groups set payload = payload || $2::jsonb, updated_at = now() where id = $1",
+    [groupId, JSON.stringify(patch)]
+  );
+  return Number(result.rowCount) === 1;
+}
+
+// Advance only the schedule: a running payment must not restore an older household snapshot.
+export async function advanceGroupSchedule(groupId: string, expectedRunAt: string | undefined, nextRunAt: string): Promise<boolean> {
+  if (!pool) {
+    const current = memory.groups.get(groupId);
+    if (!current || current.closedAt || current.nextRunAt !== expectedRunAt) return false;
+    memory.groups.set(groupId, { ...current, nextRunAt, updatedAt: Date.now() });
+    return true;
+  }
+  await initStore();
+  const result = await pool.query(
+    `update rent_groups set payload = payload || $3::jsonb, updated_at = now()
+     where id = $1 and payload->>'closedAt' is null
+       and (payload->>'nextRunAt') is not distinct from $2`,
+    [groupId, expectedRunAt ?? null, JSON.stringify({ nextRunAt, updatedAt: Date.now() })]
+  );
+  return Number(result.rowCount) === 1;
 }
 
 export async function listPayments(groupId: string): Promise<PaymentRecord[]> {
@@ -204,7 +253,7 @@ export async function reservePaymentAttempt(record: PaymentRecord): Promise<{ cl
       return { claimed: true, payment: record };
     }
     if (existing.status === "failed" || existing.status === "rejected") {
-      const retry = retryRecord(existing);
+      const retry = retryRecord(existing, record);
       memory.payments.set(retry.id, retry);
       return { claimed: true, payment: retry };
     }
@@ -220,11 +269,11 @@ export async function reservePaymentAttempt(record: PaymentRecord): Promise<{ cl
   const existing = await getPaymentById(record.id);
   if (!existing) throw new Error("Payment reservation could not be read after conflict.");
   if (existing.status !== "failed" && existing.status !== "rejected") return { claimed: false, payment: existing };
-  const retry = retryRecord(existing);
+  const retry = retryRecord(existing, record);
   const updated = await pool.query<{ payload: PaymentRecord }>(
-    `update payment_records set payload = $2::jsonb, updated_at = now()
+    `update payment_records set payload = $2::jsonb, task_id = $3, updated_at = now()
      where id = $1 and payload->>'status' in ('failed', 'rejected') returning payload`,
-    [record.id, JSON.stringify(retry)]
+    [record.id, JSON.stringify(retry), retry.taskId ?? null]
   );
   return updated.rows[0]
     ? { claimed: true, payment: normalizePayment(updated.rows[0].payload) }
@@ -372,12 +421,18 @@ async function getPaymentById(id: string): Promise<PaymentRecord | null> {
   return result.rows[0] ? normalizePayment(result.rows[0].payload) : null;
 }
 
-function retryRecord(existing: PaymentRecord): PaymentRecord {
+function retryRecord(existing: PaymentRecord, requested: PaymentRecord): PaymentRecord {
   return {
-    ...existing,
+    ...requested,
+    id: existing.id,
+    createdAt: existing.createdAt,
     status: "preparing",
     attemptCount: existing.attemptCount + 1,
     updatedAt: new Date().toISOString(),
+    taskId: requested.executionMode === "one-shot" ? requested.taskId : undefined,
+    userOperationHash: undefined,
+    txHash: undefined,
+    basescanUrl: undefined,
     error: undefined,
     failureStage: undefined
   };

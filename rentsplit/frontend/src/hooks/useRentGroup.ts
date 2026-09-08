@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { allocateRent, permissionCoversShare } from "../lib/workspaceModel";
 import {
-  createId, demoRunInMinutes, getInviteParams, permissionStatus, splitEqual,
+  createId, demoRunInMinutes, getInviteParams, permissionStatus,
   type PaymentRecord, type PermissionGrant, type RentCommand, type RentGroup, type Roommate
 } from "../lib/groupStorage";
 import {
-  authenticateWallet, createGroupRemote, deleteGroupRemote, fetchGroups, fetchPayments,
+  authenticateWallet, clearWalletSession, createGroupRemote, deleteGroupRemote, fetchGroups, fetchPayments,
   savePermissionRemote, updateGroupRemote
 } from "../lib/api";
 
@@ -29,10 +30,19 @@ export function useRentGroup() {
   const [groups, setGroups] = useState<RentGroup[]>([]);
   const [activeGroupId, setActiveGroupIdState] = useState<string | null>(invite?.groupId ?? null);
   const [history, setHistory] = useState<PaymentRecord[]>([]);
+  const walletGeneration = useRef(0);
+
+  const resetWallet = useCallback(() => {
+    walletGeneration.current++;
+    clearWalletSession();
+    setGroups([]);
+    setHistory([]);
+    setActiveGroupIdState(invite?.groupId ?? null);
+  }, [invite]);
 
   const activeGroup = useMemo(
-    () => groups.find((group) => group.id === activeGroupId) ?? groups[0] ?? null,
-    [activeGroupId, groups]
+    () => groups.find((group) => group.id === activeGroupId) ?? (invite ? null : groups[0] ?? null),
+    [activeGroupId, groups, invite]
   );
   const inviteRoommate = useMemo(() => {
     if (!activeGroup || !invite?.roommateId) return null;
@@ -48,19 +58,22 @@ export function useRentGroup() {
   }, []);
 
   const loadGroupsForWallet = useCallback(async (walletAddress: `0x${string}`) => {
+    resetWallet();
+    const generation = walletGeneration.current;
     const provider = window.ethereum as BrowserProvider | undefined;
     if (!provider) throw new Error("MetaMask is not available in this browser.");
     await authenticateWallet(walletAddress, provider);
     const { groups: remoteGroups } = await fetchGroups();
+    if (generation !== walletGeneration.current) return [];
     setGroups(remoteGroups);
     const invited = invite?.groupId ? remoteGroups.find((group) => group.id === invite.groupId) : undefined;
-    setActiveGroupIdState(invited?.id ?? remoteGroups[0]?.id ?? null);
+    setActiveGroupIdState(invite ? invited?.id ?? invite.groupId : remoteGroups[0]?.id ?? null);
     setHistory([]);
     return remoteGroups;
-  }, [invite]);
+  }, [invite, resetWallet]);
 
   const createGroup = useCallback(async (input: CreateGroupInput) => {
-    const defaultSplits = splitEqual(input.totalRent, input.roommates.length);
+    const defaultSplits = allocateRent(input.totalRent, input.roommates.map((roommate) => roommate.share));
     const draft: RentGroup = {
       id: createId("group"), adminWalletAddress: input.adminWalletAddress,
       propertyName: input.propertyName.trim() || "Apartment", propertyAddress: input.propertyAddress.trim(),
@@ -69,7 +82,7 @@ export function useRentGroup() {
       autopayEnabled: input.autopayEnabled, permissionBufferPercent: input.permissionBufferPercent,
       roommates: input.roommates.map((roommate, index) => ({
         id: createId("roommate"), name: roommate.name.trim() || `Roommate ${index + 1}`,
-        walletAddress: roommate.walletAddress, share: roommate.share?.trim() || defaultSplits[index] || "0.00"
+        walletAddress: roommate.walletAddress, share: defaultSplits[index]
       })),
       createdAt: Date.now(), updatedAt: Date.now()
     };
@@ -126,7 +139,7 @@ export function useRentGroup() {
   );
   const stats = useMemo(() => {
     const roommates: Roommate[] = activeGroup?.roommates ?? [];
-    const granted = roommates.filter((roommate) => permissionStatus(roommate) === "granted").length;
+    const granted = roommates.filter((roommate) => permissionStatus(roommate) === "granted" && permissionCoversShare(roommate)).length;
     const now = new Date();
     const monthlyTotal = groupHistory.filter((record) => record.status === "confirmed")
       .filter((record) => { const date = new Date(record.date); return date.getUTCMonth() === now.getUTCMonth() && date.getUTCFullYear() === now.getUTCFullYear(); })
@@ -135,7 +148,7 @@ export function useRentGroup() {
   }, [activeGroup, groupHistory]);
 
   return {
-    groups, activeGroup, setActiveGroupId: setActiveGroupIdState, createGroup, updateGroup,
+    groups, activeGroup, resetWallet, setActiveGroupId: setActiveGroupIdState, createGroup, updateGroup,
     updateRoommatePermission, deleteGroup, loadGroupsForWallet, inviteRoommate,
     isInvite: Boolean(invite?.roommateId), history: groupHistory, allHistory: history,
     mergePaymentRecords, applyCommands, replaceGroup, stats

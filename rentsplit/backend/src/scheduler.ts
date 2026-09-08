@@ -4,12 +4,13 @@ import { billingPeriodFor, nextMonthlyRun, normalizeSchedule } from "./domain.js
 import { logError, logInfo, logWarn } from "./logger.js";
 import {
   appendAgentEvent,
+  advanceGroupSchedule,
   claimRentCycle,
   getGroup,
   listAgentEvents,
   listDueGroups,
   listPayments,
-  saveGroup,
+  saveGroupIfUnchanged,
   updateRentCycleStatus
 } from "./store.js";
 import type { AgentEvent, PaymentRecord, RentCycleStatus, RentGroup } from "./types.js";
@@ -28,7 +29,7 @@ let tickRunning = false;
 export async function scheduleGroup(groupOrId: RentGroup | string): Promise<AgentState> {
   const group = await requireGroup(groupOrId);
   const scheduled = normalizeSchedule(group);
-  const saved = await saveGroup(scheduled);
+  const saved = await saveGroupIfUnchanged(group, scheduled);
   await appendAgentEvent({
     groupId: saved.id,
     type: saved.autopayEnabled ? "scheduled" : "paused",
@@ -111,8 +112,8 @@ async function executeCycle(group: RentGroup, now: Date, manual: boolean): Promi
 
     if (!manual || Date.parse(group.nextRunAt ?? "") <= now.getTime()) {
       const nextRunAt = nextMonthlyRun(group.dueDay ?? 1, now, group.rentRunTime ?? "09:00").toISOString();
-      await saveGroup({ ...group, nextRunAt, updatedAt: Date.now() });
-      await appendAgentEvent({
+      const advanced = await advanceGroupSchedule(group.id, group.nextRunAt, nextRunAt);
+      if (advanced) await appendAgentEvent({
         groupId: group.id,
         type: "scheduled",
         message: `Next automatic rent run is ${formatUtc(nextRunAt)}.`

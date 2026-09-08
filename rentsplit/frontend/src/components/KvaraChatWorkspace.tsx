@@ -1,10 +1,14 @@
-import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
-  Bot,
+  ArrowDown,
+  Check,
+  Building2,
   CalendarClock,
   Copy,
   DoorOpen,
+  House,
+  KeyRound,
   Loader2,
   Play,
   Plus,
@@ -16,9 +20,14 @@ import {
   X
 } from "lucide-react";
 import { formatUnits, isAddress } from "viem";
-import { clearWalletSession, getAgentState, refreshStatuses, runAgentNow } from "../lib/api";
+import { getAgentState, refreshStatuses, runAgentNow } from "../lib/api";
 import { sendVeniceMessage } from "../lib/veniceClient";
+import { useKvaraProfile } from "../hooks/useKvaraProfile";
 import { useMetaMaskPermissions } from "../hooks/useMetaMaskPermissions";
+import { profileRoleLabel, type KvaraProfileRole } from "../lib/profileRegistry";
+import { nextRentSchedule, paymentErrorText, permissionCoversShare } from "../lib/workspaceModel";
+import propertyHero from "../assets/property-hero.png";
+import "./workspace.css";
 import {
   BASE_CHAIN_HEX,
   BASE_EXPLORER_URL,
@@ -80,6 +89,7 @@ type Props = {
   onPermissionGranted: (roommateId: string, permission: PermissionGrant) => Promise<void>;
   onDeleteGroup: (groupId: string) => Promise<boolean>;
   onWalletConnected: (walletAddress: `0x${string}`) => Promise<RentGroup[]>;
+  onWalletDisconnected: () => void;
   onPaymentsUpdated: (records: PaymentRecord[]) => void;
   onCommands: (commands: RentCommand[], serverGroup: RentGroup) => Promise<RentGroup | null>;
 };
@@ -102,16 +112,27 @@ export function KvaraChatWorkspace({
   onPermissionGranted,
   onDeleteGroup,
   onWalletConnected,
+  onWalletDisconnected,
   onPaymentsUpdated,
   onCommands
 }: Props) {
   const [account, setAccount] = useState<`0x${string}` | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [walletChainId, setWalletChainId] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [endingLease, setEndingLease] = useState(false);
+  const [confirmEndLease, setConfirmEndLease] = useState(false);
+  const [mobileView, setMobileView] = useState<"chat" | "home">("chat");
+  const walletAttempt = useRef(0);
+  const chatEnd = useRef<HTMLDivElement>(null);
+  const chatScroll = useRef<HTMLDivElement>(null);
+  const [newMessages, setNewMessages] = useState(false);
   const [setupDraft, setSetupDraft] = useState<SetupDraft>({
     propertyAddress: "",
     landlordAddress: "",
-    totalRent: "3000.00",
+    totalRent: "",
     dueDay: "1",
     rentRunTime: "09:00",
     residents: []
@@ -125,15 +146,26 @@ export function KvaraChatWorkspace({
   const [runningNow, setRunningNow] = useState(false);
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
   const { loading: permissionLoading, error: permissionError, detail, requestRentPermission } = useMetaMaskPermissions();
+  const {
+    loading: profileLoading,
+    submitting: profileSubmitting,
+    role: profileRole,
+    error: profileError,
+    createProfile,
+    checked: profileChecked,
+    txHash: profileTxHash,
+    retry: retryProfile
+  } = useKvaraProfile(account);
 
   const connectedRoommate = useMemo(() => {
     if (!group || !account) return null;
     return group.roommates.find((roommate) => sameAddress(roommate.walletAddress, account)) ?? null;
   }, [account, group]);
   const greeting = connectedRoommate ? residentGreeting(connectedRoommate) : null;
-  const visibleGroup = account || isInvite ? group : null;
+  const profileReady = profileRole !== null;
+  const visibleGroup = signedIn ? group : null;
   const canManageGroup = Boolean(
-    account && group && !isInvite && (!group.adminWalletAddress || sameAddress(group.adminWalletAddress, account))
+    signedIn && account && group && sameAddress(group.adminWalletAddress ?? "", account)
   );
 
   const inviteWalletMatches = Boolean(
@@ -149,26 +181,52 @@ export function KvaraChatWorkspace({
 
   const handleWalletAccount = useCallback(
     async (nextAccount: `0x${string}`) => {
+      const attempt = ++walletAttempt.current;
+      onWalletDisconnected();
+      setSignedIn(false);
+      setConnecting(true);
+      setMessages([]);
+      setInput("");
+      setAgentEvents([]);
+      setAsking(false);
+      setRunningNow(false);
+      setCreating(false);
+      setEndingLease(false);
+      setSetupError(null);
+      setConfirmEndLease(false);
+      setSetupDraft({ propertyAddress: "", landlordAddress: "", totalRent: "", dueDay: "1", rentRunTime: "09:00", residents: [] });
       setConnectError(null);
       setAccount(nextAccount);
-      const ethereum = window.ethereum as MetaMaskProvider | undefined;
-      const chainId = await ethereum?.request({ method: "eth_chainId" });
-      setWalletChainId(typeof chainId === "string" ? chainId.toLowerCase() : null);
-      await onWalletConnected(nextAccount);
+      try {
+        const ethereum = window.ethereum as MetaMaskProvider | undefined;
+        const chainId = await ethereum?.request({ method: "eth_chainId" });
+        if (attempt !== walletAttempt.current) return;
+        setWalletChainId(typeof chainId === "string" ? chainId.toLowerCase() : null);
+        await onWalletConnected(nextAccount);
+        if (attempt === walletAttempt.current) setSignedIn(true);
+      } catch (cause) {
+        if (attempt === walletAttempt.current) setConnectError(cause instanceof Error ? cause.message : "Could not sign in. Try connecting again.");
+      } finally {
+        if (attempt === walletAttempt.current) setConnecting(false);
+      }
     },
-    [onWalletConnected]
+    [onWalletConnected, onWalletDisconnected]
   );
 
   useEffect(() => {
-    if (!account) return;
+    if (!account || !profileRole || !signedIn) return;
     setSetupDraft((current) => {
-      if (current.residents.some((resident) => sameAddress(resident.walletAddress, account))) return current;
+      if (current.residents.length > 0) return current;
+      if (profileRole === "landlord") return {
+        ...current, landlordAddress: account,
+        residents: [{ id: createMessageId("resident"), name: "", walletAddress: "", share: "" }]
+      };
       return {
         ...current,
         residents: [
           {
             id: createMessageId("resident"),
-            name: "You",
+            name: "",
             walletAddress: account,
             share: ""
           },
@@ -176,7 +234,16 @@ export function KvaraChatWorkspace({
         ]
       };
     });
-  }, [account]);
+  }, [account, profileRole, signedIn]);
+
+  useEffect(() => {
+    const area = chatScroll.current;
+    if (!area) return;
+    if (area.scrollHeight - area.scrollTop - area.clientHeight < 220) {
+      chatEnd.current?.scrollIntoView({ block: "end", behavior: "auto" });
+      setNewMessages(false);
+    } else if (messages.length) setNewMessages(true);
+  }, [messages, asking, runningNow]);
 
   useEffect(() => {
     const ethereum = window.ethereum as MetaMaskProvider | undefined;
@@ -186,6 +253,14 @@ export function KvaraChatWorkspace({
       const accounts = Array.isArray(value) ? value : [];
       const nextAccount = typeof accounts[0] === "string" ? (accounts[0] as `0x${string}`) : null;
       if (!nextAccount) {
+        walletAttempt.current++;
+        onWalletDisconnected();
+        setSignedIn(false);
+        setConnecting(false);
+        setMessages([]);
+        setAgentEvents([]);
+        setInput("");
+        setSetupDraft({ propertyAddress: "", landlordAddress: "", totalRent: "", dueDay: "1", rentRunTime: "09:00", residents: [] });
         setAccount(null);
         setConnectError(null);
         return;
@@ -207,10 +282,10 @@ export function KvaraChatWorkspace({
       ethereum.removeListener?.("accountsChanged", handleAccountsChanged);
       ethereum.removeListener?.("chainChanged", handleChainChanged);
     };
-  }, [handleWalletAccount]);
+  }, [handleWalletAccount, onWalletDisconnected]);
 
   useEffect(() => {
-    if (!group) return;
+    if (!group || !signedIn) return;
     const groupId = group.id;
     let cancelled = false;
 
@@ -230,7 +305,7 @@ export function KvaraChatWorkspace({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [group, onPaymentsUpdated]);
+  }, [group, signedIn, onPaymentsUpdated]);
 
   useEffect(() => {
     if (pendingTaskIds.length === 0) return;
@@ -279,16 +354,23 @@ export function KvaraChatWorkspace({
   }
 
   async function disconnectWallet() {
+    walletAttempt.current++;
+    onWalletDisconnected();
+    setSignedIn(false);
+    setConnecting(false);
+    setMessages([]);
+    setAgentEvents([]);
+    setInput("");
+    setSetupDraft({ propertyAddress: "", landlordAddress: "", totalRent: "", dueDay: "1", rentRunTime: "09:00", residents: [] });
+    setAccount(null);
+    setWalletChainId(null);
+    setConnectError(null);
     const ethereum = window.ethereum as MetaMaskProvider | undefined;
     try {
       await ethereum?.request({ method: "wallet_revokePermissions", params: [{ eth_accounts: {} }] });
     } catch {
       // Some wallets do not expose revocation; local session reset is still useful.
     }
-    if (account) clearWalletSession(account);
-    setAccount(null);
-    setWalletChainId(null);
-    setConnectError(null);
   }
 
   async function switchToBase() {
@@ -302,13 +384,29 @@ export function KvaraChatWorkspace({
     }
   }
 
+  async function handleCreateProfile(role: KvaraProfileRole) {
+    const attempt = walletAttempt.current;
+    try {
+      const profile = await createProfile(role);
+      if (attempt !== walletAttempt.current) return;
+      pushAssistant(
+        `${profileRoleLabel(profile.role)} profile is active on Base.\n${profile.basescanUrl}`
+      );
+    } catch {
+      // The profile bubble owns the actionable error state.
+    }
+  }
+
   async function handleCreateGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (creating) return;
+    const attempt = walletAttempt.current;
+    setCreating(true);
     setSetupError(null);
 
     try {
       if (!account) throw new Error("Connect MetaMask first.");
-      const roommates = ensureCurrentResident(parseResidentRows(setupDraft.residents, account), account);
+      const roommates = parseResidentRows(setupDraft.residents, account);
       if (roommates.length === 0) throw new Error("Add at least one resident wallet.");
       const propertyAddress = setupDraft.propertyAddress.trim();
       if (!propertyAddress) throw new Error("Add the apartment address.");
@@ -330,6 +428,7 @@ export function KvaraChatWorkspace({
         roommates
       });
 
+      if (attempt !== walletAttempt.current) return;
       setMessages([
         {
           id: createMessageId("assistant"),
@@ -338,24 +437,34 @@ export function KvaraChatWorkspace({
         }
       ]);
     } catch (cause) {
-      setSetupError(cause instanceof Error ? cause.message : "Could not create apartment.");
+      if (attempt === walletAttempt.current) setSetupError(cause instanceof Error ? cause.message : "Could not create apartment.");
+    } finally {
+      if (attempt === walletAttempt.current) setCreating(false);
     }
   }
 
   async function grantPermission(roommate: Roommate) {
     if (!group) return;
-    const permission = await requestRentPermission(group, roommate);
-    await onPermissionGranted(roommate.id, permission);
-    pushAssistant("Permission is active. Kvara can now include this wallet in the rent run.");
+    const attempt = walletAttempt.current;
+    try {
+      const permission = await requestRentPermission(group, roommate);
+      if (attempt !== walletAttempt.current) return;
+      await onPermissionGranted(roommate.id, permission);
+      pushAssistant("Permission is active. Your share will be paid on rent day.");
+    } catch (cause) {
+      if (attempt === walletAttempt.current) pushAssistant(cause instanceof Error ? cause.message : "Could not save your permission. Please try again.");
+    }
   }
 
   async function runAgentDemo() {
     if (!group) return;
+    const attempt = walletAttempt.current;
     setRunningNow(true);
     const startedAt = Date.now();
     const existingPaymentIds = new Set(history.map((record) => record.id));
     try {
       const response = await runAgentNow(group.id);
+      if (attempt !== walletAttempt.current) return;
       onPaymentsUpdated(response.payments);
       setAgentEvents(response.events);
       setAgentRunning(false);
@@ -367,25 +476,29 @@ export function KvaraChatWorkspace({
       if (taskIds.length > 0) {
         try {
           const payments = await pollPaymentStatuses(group.id, taskIds, onPaymentsUpdated);
+          if (attempt !== walletAttempt.current) return;
           if (payments.length > 0) {
             pushAssistant(summarizePaymentStatus(payments));
           }
         } catch {
-          pushAssistant("Base accepted the payment operation. Confirmation is still pending.");
+          if (attempt === walletAttempt.current) pushAssistant("Confirmation is still pending. Check the payment history for updates.");
         }
       }
     } catch (cause) {
-      pushAssistant(cause instanceof Error ? cause.message : "Agent run failed.");
+      if (attempt === walletAttempt.current) pushAssistant(cause instanceof Error ? cause.message : "Agent run failed.");
     } finally {
-      setRunningNow(false);
+      if (attempt === walletAttempt.current) setRunningNow(false);
     }
   }
 
   async function endLease() {
-    if (!group || !canManageGroup) return;
+    if (!group || !canManageGroup || endingLease) return;
+    const attempt = walletAttempt.current;
+    setEndingLease(true);
+    try {
     const name = group.propertyName;
     const deleted = await onDeleteGroup(group.id);
-    if (!deleted) return;
+    if (!deleted || attempt !== walletAttempt.current) return;
     setMessages([
       {
         id: createMessageId("assistant"),
@@ -393,12 +506,18 @@ export function KvaraChatWorkspace({
         text: `${name} is closed and Kvara autopay is stopped. Your wallet permission was not revoked onchain; remove it in MetaMask if you no longer want it active.`
       }
     ]);
+    setConfirmEndLease(false);
+    } catch (cause) {
+      if (attempt === walletAttempt.current) pushAssistant(cause instanceof Error ? cause.message : "Could not close this lease. Try again.");
+    } finally {
+      if (attempt === walletAttempt.current) setEndingLease(false);
+    }
   }
 
   async function askKvara(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const message = input.trim();
-    if (!message || asking) return;
+    if (!message || asking || !canManageGroup) return;
     setInput("");
     pushUser(message);
 
@@ -408,25 +527,31 @@ export function KvaraChatWorkspace({
     }
 
     setAsking(true);
+    const attempt = walletAttempt.current;
     try {
-      const response = await sendVeniceMessage({ message, groupId: group.id });
+      const response = await sendVeniceMessage({ message, groupId: group.id, conversation: messages.slice(-12).map(({ role, text }) => ({ role, content: text.slice(0, 2000) })) });
+      if (attempt !== walletAttempt.current) return;
       const commandSummary = response.commands.length > 0 ? summarizeRentCommands(group, response.commands) : "";
       if (response.commands.length > 0) {
         await onCommands(response.commands, response.group);
       }
       pushAssistant(joinChatSections(response.message, commandSummary));
     } catch (cause) {
-      pushAssistant(cause instanceof Error ? cause.message : "Kvara agent request failed.");
+      if (attempt === walletAttempt.current) pushAssistant(cause instanceof Error ? cause.message : "Kvara agent request failed.");
     } finally {
-      setAsking(false);
+      if (attempt === walletAttempt.current) setAsking(false);
     }
   }
 
   async function copyInvite(roommate: Roommate) {
     if (!group) return;
+    try {
     await navigator.clipboard.writeText(createInviteUrl(group, roommate.id));
     setCopiedInviteId(roommate.id);
     window.setTimeout(() => setCopiedInviteId(null), 1400);
+    } catch {
+      pushAssistant(`Copy this invitation link:\n${createInviteUrl(group, roommate.id)}`);
+    }
   }
 
   function pushUser(text: string) {
@@ -438,72 +563,100 @@ export function KvaraChatWorkspace({
   }
 
   return (
-    <main className="min-h-[100dvh] bg-[#e9e3d7] text-stone-950">
-      <div className="mx-auto flex min-h-[100dvh] max-w-[1180px] flex-col px-3 py-3 sm:px-5 sm:py-5">
-        <header className="mb-3 flex items-center justify-between gap-3 border border-stone-300 bg-[#f8f2e8] px-4 py-3">
+    <main className="workspace">
+      <div className="workspace-shell">
+        <header className="workspace-header">
           <div className="flex items-center gap-3">
             <div>
-              <p className="text-xl font-semibold leading-none text-stone-950">Kvara</p>
-              <p className="mt-1 text-xs text-stone-500">Autonomous rent on Base</p>
+              <a href={window.location.pathname} className="workspace-wordmark" aria-label="Kvara home">Kvara<span>.</span></a>
+              <p className="workspace-caption">A little less to think about.</p>
             </div>
           </div>
           {account ? (
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <span className="border border-stone-300 bg-white px-3 py-2 font-mono text-xs text-stone-600">
+            <div className="workspace-wallet flex flex-wrap items-center justify-end gap-2">
+              <span title={account} className="workspace-wallet-address border border-stone-300 bg-white px-3 py-2 font-mono text-xs text-stone-600">
                 {shortAddress(account)}
               </span>
+              {profileRole ? (
+                <span className="workspace-wallet-role border border-stone-300 bg-[#efe7d8] px-3 py-2 text-xs font-semibold text-stone-700">
+                  {profileRoleLabel(profileRole)}
+                </span>
+              ) : null}
               <button
                 type="button"
                 onClick={switchWallet}
-                className="inline-flex h-9 items-center gap-2 border border-stone-300 bg-white px-3 text-xs font-semibold text-stone-700 transition hover:bg-stone-50 active:translate-y-[1px]"
+                className="workspace-icon-button"
+                aria-label="Switch wallet" title="Switch wallet"
               >
                 <RefreshCw size={14} />
-                Switch
               </button>
               <button
                 type="button"
                 onClick={disconnectWallet}
-                className="inline-flex h-9 items-center gap-2 border border-stone-300 bg-white px-3 text-xs font-semibold text-stone-500 transition hover:bg-stone-50 active:translate-y-[1px]"
+                className="workspace-icon-button"
+                aria-label="Disconnect wallet" title="Disconnect wallet"
               >
                 <X size={14} />
-                Disconnect
               </button>
             </div>
-          ) : null}
+          ) : <span className="workspace-network"><span /> Base Mainnet</span>}
         </header>
 
-        <section className="grid flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_340px]">
-          <div className="flex min-h-[620px] flex-col border border-stone-300 bg-[#f8f2e8]">
-            <div className="flex-1 space-y-4 overflow-y-auto px-3 py-4 sm:px-5">
+        <nav className="workspace-mobile-nav" aria-label="Workspace views">
+          <button aria-current={mobileView === "chat" ? "page" : undefined} onClick={() => setMobileView("chat")}>Conversation</button>
+          <button aria-current={mobileView === "home" ? "page" : undefined} onClick={() => setMobileView("home")}><House size={15} /> Your home</button>
+        </nav>
+        <section className="workspace-layout" data-mobile-view={mobileView}>
+          <div className="workspace-conversation">
+            <div className="workspace-conversation-heading">
+              <div><p className="workspace-overline">Your rent desk</p><h1>{visibleGroup ? visibleGroup.propertyName : "Make yourself at home."}</h1></div>
+              <span className="workspace-network"><span /> Base</span>
+            </div>
+            {!visibleGroup ? <ol className="workspace-progress" aria-label="Setup progress">
+              {[["Connect", signedIn], ["Profile", profileReady && signedIn], ["Home", false]].map(([label, done], index) => (
+                <li key={String(label)} data-complete={done ? "true" : "false"}><span>{done ? <Check size={12} /> : index + 1}</span>{label}</li>
+              ))}
+            </ol> : null}
+            <div ref={chatScroll} className="workspace-messages" aria-label="Conversation" onScroll={() => {
+              const area = chatScroll.current;
+              if (area && area.scrollHeight - area.scrollTop - area.clientHeight < 100) setNewMessages(false);
+            }}>
               <AssistantBubble>
                 {!account
-                  ? "Connect your wallet first. I will understand whether you are creating a new apartment or accepting an invite."
+                  ? "Welcome to Kvara. Connect your wallet to find your home or start a new lease."
+                  : connecting ? "Confirm the sign-in message in MetaMask."
+                  : !signedIn ? "Sign in to open your rent desk."
+                  : profileLoading
+                    ? "Checking your Kvara profile on Base."
+                    : !profileReady
+                      ? "First, a place for you. Are you renting, a landlord, or both?"
                   : isInvite
-                    ? `You were invited to ${group?.propertyName ?? "an apartment"}. I can request the bounded permission when you are ready.`
+                    ? group && inviteRoommate ? `Welcome to ${group.propertyName}. Approve your rent limit to get settled in.` : "This invitation is unavailable for this wallet. Switch to the invited wallet or ask the host for a new link."
                     : group
                       ? canManageGroup
-                        ? `${greeting ? `${greeting}. ` : ""}I found ${group.propertyName}. You can ask me to recalculate rent, copy invites, or run the demo rent day.`
+                        ? `${greeting ? `${greeting}. ` : "Welcome back. "}Your home is here. Tell me what's changed, and I will work out the rent.`
                         : connectedRoommate
-                          ? `${greeting ? `${greeting}. ` : ""}I found ${group.propertyName}. I can request your bounded permission for this home.`
+                          ? `${greeting ? `${greeting}. ` : ""}Your share and payment history are here. ${permissionStatus(connectedRoommate) === "granted" ? "Your rent permission is active." : "Approve your rent limit to join autopay."}`
                           : `I found ${group.propertyName}. You can ask me rent questions from this wallet.`
                       : "This wallet has no Kvara apartment yet. Tell me the basics and I will prepare the rent room."}
               </AssistantBubble>
 
-              {!account ? (
+              {!signedIn ? (
                 <ActionBubble>
                   <button
                     type="button"
                     onClick={connectWallet}
+                    disabled={connecting}
                     className="inline-flex h-11 items-center gap-2 bg-emerald-950 px-4 text-sm font-semibold text-white transition hover:bg-emerald-900 active:translate-y-[1px]"
                   >
-                    <Wallet size={17} />
-                    Connect MetaMask
+                    {connecting ? <Loader2 size={17} className="animate-spin" /> : <Wallet size={17} />}
+                    {connecting ? "Signing in" : "Connect MetaMask"}
                   </button>
                   {connectError ? <p className="mt-3 text-sm text-rose-700">{connectError}</p> : null}
                 </ActionBubble>
               ) : null}
 
-              {account && connectError ? (
+              {signedIn && connectError ? (
                 <ActionBubble>
                   <p className="text-sm text-rose-700">{connectError}</p>
                 </ActionBubble>
@@ -523,7 +676,20 @@ export function KvaraChatWorkspace({
                 </ActionBubble>
               ) : null}
 
-              {account && isInvite && group && inviteRoommate ? (
+              {signedIn && account && !profileLoading && !profileChecked ? <ActionBubble>
+                <p className="text-sm text-rose-700" role="alert">{profileError}</p>
+                <button className="workspace-text-button mt-3" onClick={retryProfile}><RefreshCw size={14} className="mr-2 inline" /> Check again</button>
+              </ActionBubble> : null}
+              {signedIn && account && walletChainId === BASE_CHAIN_HEX && profileChecked && !profileLoading && !profileReady ? (
+                <ProfileSetupBubble
+                  loading={profileSubmitting}
+                  error={profileError}
+                  onSelect={handleCreateProfile}
+                  txHash={profileTxHash}
+                />
+              ) : null}
+
+              {signedIn && account && profileReady && isInvite && group && inviteRoommate ? (
                 <InvitePermissionBubble
                   group={group}
                   roommate={inviteRoommate}
@@ -537,16 +703,17 @@ export function KvaraChatWorkspace({
                 />
               ) : null}
 
-              {account && !isInvite && !group ? (
+              {signedIn && account && profileReady && !isInvite && !group ? (
                 <SetupBubble
                   draft={setupDraft}
                   error={setupError}
+                  loading={creating}
                   onChange={setSetupDraft}
                   onSubmit={handleCreateGroup}
                 />
               ) : null}
 
-              {account && group && !isInvite ? (
+              {signedIn && account && profileReady && group && (!isInvite || canManageGroup) ? (
                 <ApartmentActionsBubble
                   group={group}
                   connectedRoommate={connectedRoommate}
@@ -569,20 +736,24 @@ export function KvaraChatWorkspace({
                   <UserBubble key={message.id}>{message.text}</UserBubble>
                 )
               )}
-
+              {asking || runningNow ? <p className="workspace-thinking" role="status"><Loader2 size={14} className="animate-spin" />{runningNow ? "Checking this month's payments..." : "Working out the rent..."}</p> : null}
+              <div ref={chatEnd} />
             </div>
 
-            <form onSubmit={askKvara} className="flex gap-2 border-t border-stone-300 p-3">
+            {newMessages ? <button className="workspace-new-messages" onClick={() => { chatEnd.current?.scrollIntoView({ block: "end" }); setNewMessages(false); }}><ArrowDown size={14} /> Latest message</button> : null}
+            <form onSubmit={askKvara} className="workspace-composer">
               <input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder={group ? "Maya is away for two weeks, update the split" : "Create an apartment first"}
-                disabled={!account}
+                aria-label="Message Kvara"
+                maxLength={2000}
+                placeholder={!signedIn ? "Connect your wallet to begin" : !profileReady ? "Create your profile to continue" : !group ? "Set up your home first" : !canManageGroup ? "Your host manages rent changes" : "Tell Kvara what's changed..."}
+                disabled={!signedIn || !profileReady || !canManageGroup}
                 className="min-w-0 flex-1 border border-stone-300 bg-white px-3 py-3 text-sm outline-none transition focus:border-emerald-800 disabled:bg-stone-100"
               />
               <button
                 type="submit"
-                disabled={!account || asking}
+                disabled={!signedIn || !profileReady || !canManageGroup || asking || !input.trim()}
                 className="grid h-12 w-12 place-items-center bg-emerald-950 text-white transition hover:bg-emerald-900 disabled:bg-stone-300"
                 aria-label="Send"
                 title="Send"
@@ -590,18 +761,22 @@ export function KvaraChatWorkspace({
                 {asking ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
               </button>
             </form>
+            <p className="workspace-composer-note">{canManageGroup ? "Rent changes stay within each resident's approved limit." : "Your wallet. Your rent. Your say."}</p>
           </div>
 
           <ApartmentSnapshot
             group={visibleGroup}
-            inviteRoommate={inviteRoommate}
-            connectedRoommate={connectedRoommate}
+            inviteRoommate={signedIn ? inviteRoommate : null}
+            connectedRoommate={signedIn ? connectedRoommate : null}
             setupDraft={setupDraft}
             stats={stats}
-            history={history}
-            events={agentEvents}
+            history={signedIn ? history : []}
+            events={signedIn ? agentEvents : []}
             canManageGroup={canManageGroup}
             onEndLease={endLease}
+            confirming={confirmEndLease}
+            ending={endingLease}
+            onConfirmEndLease={setConfirmEndLease}
           />
         </section>
       </div>
@@ -611,11 +786,9 @@ export function KvaraChatWorkspace({
 
 function AssistantBubble({ children }: { children: string }) {
   return (
-    <div className="flex gap-3">
-      <div className="grid h-8 w-8 shrink-0 place-items-center bg-emerald-950 text-stone-50">
-        <Bot size={16} />
-      </div>
-      <div className="max-w-[760px] whitespace-pre-line border border-stone-300 bg-white px-4 py-3 text-sm leading-relaxed text-stone-800">
+    <div className="workspace-assistant">
+      <span className="workspace-speaker">Kvara</span>
+      <div className="workspace-assistant-text">
         <LinkifiedText text={children} />
       </div>
     </div>
@@ -624,8 +797,8 @@ function AssistantBubble({ children }: { children: string }) {
 
 function UserBubble({ children }: { children: string }) {
   return (
-    <div className="flex justify-end">
-      <div className="max-w-[720px] whitespace-pre-line bg-emerald-950 px-4 py-3 text-sm leading-relaxed text-white">
+    <div className="workspace-user">
+      <div>
         {children}
       </div>
     </div>
@@ -643,9 +816,9 @@ function LinkifiedText({ text }: { text: string }) {
             href={part}
             target="_blank"
             rel="noreferrer"
-            className="font-semibold text-emerald-800 underline underline-offset-2"
+            className="workspace-message-link"
           >
-            {part}
+            {/^https:\/\/basescan.org\/tx\/0x[\da-f]{64}$/i.test(part) ? <>View transaction <ArrowUpRight size={14} /></> : part}
           </a>
         ) : (
           <span key={`${part}-${index}`}>{part}</span>
@@ -656,17 +829,66 @@ function LinkifiedText({ text }: { text: string }) {
 }
 
 function ActionBubble({ children }: { children: ReactNode }) {
-  return <div className="ml-11 max-w-[760px] border border-stone-300 bg-[#efe7d8] p-4">{children}</div>;
+  return <div className="workspace-action">{children}</div>;
+}
+
+function ProfileSetupBubble({
+  loading,
+  error,
+  onSelect,
+  txHash
+}: {
+  loading: boolean;
+  error?: string;
+  onSelect: (role: KvaraProfileRole) => void;
+  txHash?: `0x${string}`;
+}) {
+  const options: Array<{ role: KvaraProfileRole; label: string; icon: typeof House }> = [
+    { role: "resident", label: "Resident", icon: House },
+    { role: "landlord", label: "Landlord", icon: KeyRound },
+    { role: "both", label: "Both", icon: Building2 }
+  ];
+
+  return (
+    <ActionBubble>
+      <p className="mb-3 text-sm font-semibold">Your role</p>
+      {txHash ? <div className="flex flex-wrap items-center gap-3">
+        <a className="workspace-message-link" href={`${BASE_EXPLORER_URL}/tx/${txHash}`} target="_blank" rel="noreferrer">View profile transaction <ArrowUpRight size={14} /></a>
+        <button className="workspace-text-button" disabled={loading} onClick={() => onSelect("resident")}>Check confirmation</button>
+      </div> : <div className="grid gap-2 sm:grid-cols-3">
+        {options.map((option) => {
+          const Icon = option.icon;
+          return (
+            <button
+              key={option.role}
+              type="button"
+              onClick={() => onSelect(option.role)}
+              disabled={loading}
+              className="flex h-12 items-center justify-center gap-2 border border-stone-400 bg-white px-3 text-sm font-semibold text-stone-900 transition hover:border-emerald-900 hover:bg-stone-50 disabled:text-stone-400"
+            >
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <Icon size={16} />}
+              {option.label}
+            </button>
+          );
+        })}
+      </div>}
+      <p className="mt-3 text-xs leading-relaxed text-stone-600">A public profile, created once on Base. A small network fee in ETH applies.</p>
+      {loading ? <p className="mt-3 text-sm text-stone-600" role="status">Confirm in MetaMask, then wait for Base.</p> : null}
+      {error ? <p className="mt-3 text-sm text-rose-700">{error}</p> : null}
+    </ActionBubble>
+  );
 }
 
 function SetupBubble({
   draft,
   error,
+  loading,
   onChange,
   onSubmit
 }: {
   draft: SetupDraft;
   error: string | null;
+  loading: boolean;
   onChange: (draft: SetupDraft) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -699,7 +921,8 @@ function SetupBubble({
 
   return (
     <ActionBubble>
-      <form onSubmit={onSubmit} className="grid gap-3">
+      <form onSubmit={onSubmit} className="grid gap-4">
+        <h2 className="text-lg font-semibold">The place you call home</h2>
         <Field label="Apartment address">
           <input
             value={draft.propertyAddress}
@@ -740,7 +963,7 @@ function SetupBubble({
               className="w-full border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-800"
             />
           </Field>
-          <Field label="Run time">
+          <Field label="Payment time (UTC)">
             <input
               value={draft.rentRunTime}
               onChange={(event) => onChange({ ...draft, rentRunTime: event.target.value })}
@@ -749,7 +972,8 @@ function SetupBubble({
             />
           </Field>
         </div>
-        <Field label="Residents">
+        <div role="group" aria-label="Residents">
+          <p className="mb-2 text-sm font-semibold">Who lives here?</p>
           <div className="border border-stone-300 bg-white">
             <div className="hidden grid-cols-[1fr_1.5fr_104px_42px] border-b border-stone-300 bg-stone-50 px-3 py-2 text-[11px] font-semibold uppercase text-stone-500 md:grid">
               <span>Name</span>
@@ -806,14 +1030,15 @@ function SetupBubble({
               Add resident
             </button>
           </div>
-        </Field>
+        </div>
         {error ? <p className="text-sm text-rose-700">{error}</p> : null}
         <button
           type="submit"
+          disabled={loading}
           className="inline-flex h-11 w-fit items-center gap-2 bg-emerald-950 px-4 text-sm font-semibold text-white transition hover:bg-emerald-900 active:translate-y-[1px]"
         >
-          Prepare apartment
-          <ArrowUpRight size={16} />
+          {loading ? "Preparing your home" : "Prepare apartment"}
+          {loading ? <Loader2 size={16} className="animate-spin" /> : <ArrowUpRight size={16} />}
         </button>
       </form>
     </ActionBubble>
@@ -868,11 +1093,11 @@ function InvitePermissionBubble({
       <button
         type="button"
         onClick={onGrant}
-        disabled={!walletMatches || loading || status === "granted"}
+        disabled={!walletMatches || loading || (status === "granted" && permissionCoversShare(roommate))}
         className="mt-4 inline-flex h-11 items-center gap-2 bg-emerald-950 px-4 text-sm font-semibold text-white transition hover:bg-emerald-900 disabled:bg-stone-300"
       >
         <ShieldCheck size={17} />
-        {status === "granted" ? "Permission active" : loading ? detail ?? "Opening MetaMask" : "Grant permission"}
+        {loading ? detail ?? "Opening MetaMask" : status === "granted" ? permissionCoversShare(roommate) ? "Permission active" : "Update permission" : "Grant permission"}
       </button>
     </ActionBubble>
   );
@@ -903,7 +1128,7 @@ function ApartmentActionsBubble({
   onCopyInvite: (roommate: Roommate) => void;
   onRunAgent: () => void;
 }) {
-  const needsPermission = connectedRoommate && permissionStatus(connectedRoommate) !== "granted";
+  const needsPermission = connectedRoommate && (permissionStatus(connectedRoommate) !== "granted" || !permissionCoversShare(connectedRoommate));
   if (!needsPermission && !canManageGroup) return null;
 
   return (
@@ -917,7 +1142,7 @@ function ApartmentActionsBubble({
             className="inline-flex h-10 items-center gap-2 bg-emerald-950 px-3 text-sm font-semibold text-white transition hover:bg-emerald-900 disabled:bg-stone-300"
           >
             <ShieldCheck size={16} />
-            {permissionLoading ? permissionDetail ?? "Opening MetaMask" : "Grant my permission"}
+            {permissionLoading ? permissionDetail ?? "Opening MetaMask" : connectedRoommate.permission ? "Update my permission" : "Grant my permission"}
           </button>
         ) : null}
         {canManageGroup ? (
@@ -972,7 +1197,10 @@ function ApartmentSnapshot({
   history,
   events,
   canManageGroup,
-  onEndLease
+  onEndLease,
+  confirming,
+  ending,
+  onConfirmEndLease
 }: {
   group: RentGroup | null;
   inviteRoommate: Roommate | null;
@@ -983,6 +1211,9 @@ function ApartmentSnapshot({
   events: AgentEvent[];
   canManageGroup: boolean;
   onEndLease: () => void;
+  confirming: boolean;
+  ending: boolean;
+  onConfirmEndLease: (value: boolean) => void;
 }) {
   const currentRoommate = connectedRoommate ?? inviteRoommate;
   const hasDraft = Boolean(
@@ -991,25 +1222,28 @@ function ApartmentSnapshot({
       setupDraft.residents.some((resident) => resident.name.trim() || resident.walletAddress.trim())
   );
 
+  if (!group) return <aside className="workspace-home workspace-empty-home">
+    <img src={propertyHero} alt="Sunlit apartment buildings surrounded by trees" />
+    <div className="workspace-empty-copy"><p className="workspace-overline">Room for living</p>
+      <h2>{setupDraft.propertyAddress || "Home, without the rent reminders."}</h2>
+      <p>{hasDraft ? "Your home details will appear here once the lease is ready." : "One home. Every share accounted for."}</p>
+      <div className="workspace-empty-rule"><House size={18} /><span>Monthly rent, paid together.</span></div>
+    </div>
+  </aside>;
+
   return (
-    <aside className="border border-stone-300 bg-[#f8f2e8]">
-      <div className="border-b border-stone-300 p-4">
+    <aside className="workspace-home">
+      <div className="workspace-home-heading">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-semibold uppercase text-stone-500">Home brief</p>
-            <h2 className="mt-2 text-3xl font-semibold leading-none text-stone-950">
+            <p className="workspace-overline"><House size={14} /> Your home</p>
+            <h2 className="mt-3 text-2xl font-semibold leading-tight text-stone-950">
               {group?.propertyName ??
                 (setupDraft.propertyAddress ? derivePropertyName(setupDraft.propertyAddress) : "Not connected")}
             </h2>
           </div>
         </div>
-        <p className="mt-4 text-sm leading-relaxed text-stone-600">
-          {group
-            ? "Kvara is ready to coordinate rent for this home."
-            : hasDraft
-              ? "This home is being prepared in the chat."
-              : "Connect a wallet to open or create a home."}
-        </p>
+        <p className="workspace-home-status"><span data-ready={stats.granted === stats.total && stats.total > 0} />{!group.autopayEnabled ? "Autopay paused" : stats.granted === stats.total ? "Permissions ready" : "Waiting for permissions"}</p>
       </div>
 
       <div className="grid grid-cols-2 border-b border-stone-300">
@@ -1034,7 +1268,7 @@ function ApartmentSnapshot({
           }
         />
         {currentRoommate ? <SnapshotRow label="Your part" value={`${formatUsd(currentRoommate.share)} USDC`} /> : null}
-        {group ? <SnapshotRow label="Autopay" value={group.autopayEnabled ? "Active on Base" : "Paused"} /> : null}
+        {group ? <SnapshotRow label="Autopay" value={group.autopayEnabled ? "Enabled for this lease" : "Paused"} /> : null}
         {group ? <SnapshotRow label="Collected this month" value={`${formatUsd(stats.monthlyTotal)} USDC`} /> : null}
       </div>
 
@@ -1068,12 +1302,19 @@ function ApartmentSnapshot({
         <div className="border-t border-stone-300 p-4">
           <button
             type="button"
-            onClick={onEndLease}
+            onClick={() => onConfirmEndLease(true)}
             className="inline-flex h-10 w-full items-center justify-center gap-2 border border-stone-400 bg-white px-3 text-sm font-semibold text-stone-700 transition hover:bg-stone-50 active:translate-y-[1px]"
           >
             <DoorOpen size={16} />
             End lease
           </button>
+          {confirming ? <div className="mt-3 text-sm" role="alert">
+            <p>Stop future rent payments for this home? Existing wallet permissions remain in MetaMask.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="workspace-danger-button" disabled={ending} onClick={onEndLease}>{ending ? "Closing..." : "Confirm end lease"}</button>
+              <button className="workspace-text-button" disabled={ending} onClick={() => onConfirmEndLease(false)}>Keep lease</button>
+            </div>
+          </div> : null}
         </div>
       ) : null}
     </aside>
@@ -1083,9 +1324,7 @@ function ApartmentSnapshot({
 function PermissionSnapshot({ roommate }: { roommate: Roommate }) {
   const permission = roommate.permission;
   const status = permissionStatus(roommate);
-  const insufficient = permission
-    ? parseUnitsSafe(roommate.share, permission.tokenDecimals) + BigInt(permission.feeBufferAtoms || "0") > BigInt(permission.allowanceAtoms)
-    : false;
+  const insufficient = Boolean(permission) && !permissionCoversShare(roommate);
   return (
     <div className="border-t border-stone-300 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -1140,15 +1379,6 @@ function PaymentProofSnapshot({ history }: { history: PaymentRecord[] }) {
 
 function formatPermissionExpiry(expiresAt: number): string {
   return new Date(expiresAt * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-function parseUnitsSafe(value: string, decimals: number): bigint {
-  try {
-    const [whole = "0", fraction = ""] = value.split(".");
-    return BigInt(`${whole}${fraction.padEnd(decimals, "0").slice(0, decimals)}`);
-  } catch {
-    return 0n;
-  }
 }
 
 function ResidentsSnapshot({ roommates }: { roommates: Roommate[] }) {
@@ -1276,7 +1506,7 @@ function summarizeAgentRun(
 ): string {
   const runPayments = payments
     .filter((payment) => payment.groupId === group.id)
-    .filter((payment) => !existingPaymentIds.has(payment.id))
+    .filter((payment) => !existingPaymentIds.has(payment.id) || Date.parse(payment.updatedAt) >= startedAt)
     .sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 
   if (runPayments.length === 0) {
@@ -1359,15 +1589,7 @@ function formatPaymentLine(payment: PaymentRecord): string {
 }
 
 function humanPaymentError(error: string | undefined): string {
-  if (!error) return "needs attention";
-  const lower = error.toLowerCase();
-  if (lower.includes("permission is not active")) return "permission is not active";
-  if (lower.includes("permission is expired")) return "permission expired";
-  if (lower.includes("fee buffer")) return "permission buffer is too small";
-  if (lower.includes("insufficient") || lower.includes("balance") || lower.includes("revert")) {
-    return "wallet likely needs USDC on Base";
-  }
-  return error;
+  return paymentErrorText(error);
 }
 
 function joinChatSections(...sections: string[]): string {
@@ -1434,7 +1656,7 @@ function parseResidentRows(
     seen.add(normalizedWallet);
 
     const share = resident.share.trim();
-    if (share && (!Number(share) || Number(share) <= 0)) {
+    if (share && (!Number.isFinite(Number(share)) || Number(share) < 0)) {
       throw new Error(`Resident ${index + 1} needs a valid rent share or an empty auto split.`);
     }
 
@@ -1460,45 +1682,27 @@ function parseResidentRowsSafe(
   }
 }
 
-function ensureCurrentResident(
-  roommates: Array<{ name: string; walletAddress: `0x${string}`; share?: string }>,
-  account: `0x${string}`
-): Array<{ name: string; walletAddress: `0x${string}`; share?: string }> {
-  if (roommates.some((roommate) => sameAddress(roommate.walletAddress, account))) return roommates;
-  return [{ name: "You", walletAddress: account }, ...roommates];
-}
-
 function buildRentSchedule(dueDayValue: string, rentRunTimeValue: string): {
   dueDay: number;
   rentRunTime: string;
   nextRunAt: string;
 } {
-  const dueDay = clampDay(Number(dueDayValue));
-  const rentRunTime = normalizeRentRunTime(rentRunTimeValue);
-  const [hour, minute] = rentRunTime.split(":").map(Number);
-  const nextRun = new Date();
-  nextRun.setHours(hour, minute, 0, 0);
-  nextRun.setDate(Math.min(dueDay, daysInMonth(nextRun.getFullYear(), nextRun.getMonth())));
-  if (nextRun.getTime() <= Date.now()) {
-    nextRun.setMonth(nextRun.getMonth() + 1);
-    nextRun.setDate(Math.min(dueDay, daysInMonth(nextRun.getFullYear(), nextRun.getMonth())));
-  }
-
-  return { dueDay, rentRunTime, nextRunAt: nextRun.toISOString() };
+  return nextRentSchedule(Number(dueDayValue), rentRunTimeValue);
 }
 
 function formatDraftRentRun(dueDay: string, rentRunTime: string): string {
-  const schedule = buildRentSchedule(dueDay, rentRunTime);
-  return `Day ${schedule.dueDay} at ${schedule.rentRunTime}`;
+  return `Day ${dueDay || "1"} at ${rentRunTime || "09:00"} UTC`;
 }
 
 function formatRentRun(nextRunAt: string | undefined, dueDay: number, rentRunTime: string): string {
-  if (!nextRunAt) return `Day ${dueDay} at ${rentRunTime}`;
+  if (!nextRunAt) return `Day ${dueDay} at ${rentRunTime} UTC`;
   return `Next ${new Date(nextRunAt).toLocaleString("en-US", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
+    timeZone: "UTC",
+    timeZoneName: "short"
   })}`;
 }
 
@@ -1514,29 +1718,10 @@ function residentGreeting(roommate: Roommate): string {
 
 function residentPermissionLabel(roommate: Roommate): string {
   const status = permissionStatus(roommate);
-  if (status === "granted") return "ready";
+  if (status === "granted") return permissionCoversShare(roommate) ? "ready" : "needs update";
   if (status === "expired") return "expired";
   if (status === "failed") return "failed";
   return "pending";
-}
-
-function normalizeRentRunTime(value: string): string {
-  if (!/^\d{2}:\d{2}$/.test(value)) return "09:00";
-  const [rawHour, rawMinute] = value.split(":");
-  const hour = Math.min(23, Math.max(0, Number(rawHour)));
-  const minute = Math.min(59, Math.max(0, Number(rawMinute)));
-  return `${(Number.isFinite(hour) ? hour : 9).toString().padStart(2, "0")}:${(Number.isFinite(minute) ? minute : 0)
-    .toString()
-    .padStart(2, "0")}`;
-}
-
-function clampDay(value: number): number {
-  if (!Number.isFinite(value)) return 1;
-  return Math.min(28, Math.max(1, Math.round(value)));
-}
-
-function daysInMonth(year: number, month: number): number {
-  return new Date(year, month + 1, 0).getDate();
 }
 
 function derivePropertyName(address: string): string {
