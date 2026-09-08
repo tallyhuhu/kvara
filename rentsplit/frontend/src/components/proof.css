@@ -1,0 +1,80 @@
+.proof-page { min-height: 100dvh; background: #edf0eb; color: #20392f; letter-spacing: 0; }
+.proof-shell { max-width: 1280px; padding: 0 36px 32px; margin: auto; }
+.proof-header { min-height: 100px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid #ced7ce; }
+.proof-brand { font-size: 32px; font-weight: 650; line-height: 1; text-decoration: none; color: #163e30; }
+.proof-brand span { color: #758b65; }
+.proof-page nav, .proof-page a { display: inline-flex; align-items: center; gap: 8px; }
+.proof-page .proof-brand { gap: 0; }
+.proof-page nav { gap: 24px; font-size: 14px; }
+.proof-page a:hover { text-decoration: underline; text-underline-offset: 4px; }
+.proof-open { background: #20392f; color: white; padding: 12px 16px; }
+.proof-intro { padding: 42px 0 32px; display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; }
+.proof-intro h1 { font-size: 42px; font-weight: 600; line-height: 1.15; margin: 12px 0; }
+.proof-intro p { color: #526459; font-size: 15px; }
+.proof-network { display: flex; align-items: center; gap: 8px; }
+.proof-network span { width: 9px; height: 9px; background: #0000ff; border-radius: 2px; }
+.proof-update { display: flex; gap: 12px; align-items: center; font-size: 12px; color: #526459; line-height: 1.7; }
+.proof-update button { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid #bdcbbd; flex-shrink: 0; }
+.proof-page button { cursor: pointer; }
+.proof-page button:hover { background: #dce5d8; }
+.proof-page button:disabled { opacity: .6; cursor: wait; }
+.proof-page :is(a, button, summary):focus-visible { outline: 2px solid #23744c; outline-offset: 4px; }
+.proof-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: #fbfcfa; border-block: 1px solid #ced7ce; }
+.proof-metrics > div { padding: 24px 20px; border-right: 1px solid #dce2dc; min-width: 0; }
+.proof-metrics > div:last-child { border-right: 0; }
+.proof-metrics dt { font-size: 13px; color: #526459; }
+.proof-metrics dd { margin: 12px 0; font-size: 28px; line-height: 1.25; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.proof-metrics p { margin-top: 12px; font-size: 12px; font-weight: 400; line-height: 1.6; color: #526459; }
+.proof-scope { font-size: 12px; line-height: 1.7; color: #526459; max-width: 100ch; margin: 16px 0 36px; }
+.proof-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.proof-page h2 { font-size: 22px; font-weight: 550; line-height: 1.3; }
+.proof-section-heading > span { color: #526459; font-size: 12px; }
+.proof-table-scroll { overflow-x: auto; }
+.proof-page table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; background: #fbfcfa; }
+.proof-page th { color: #526459; font-size: 12px; font-weight: 500; background: #e4eadf; }
+.proof-page :is(th, td) { padding: 16px; border-bottom: 1px solid #dce2dc; white-space: nowrap; }
+.proof-amount { font-variant-numeric: tabular-nums; font-weight: 600; }
+.proof-confirmed { color: #256643; }
+.proof-details { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; margin-top: 44px; padding-block: 32px; border-top: 1px solid #ced7ce; }
+.proof-details p, .proof-method p { font-size: 14px; line-height: 1.8; color: #526459; margin-top: 14px; max-width: 70ch; }
+.proof-details a { margin-top: 16px; font-size: 13px; text-decoration: underline; text-underline-offset: 4px; }
+.proof-code { display: inline-block; margin-top: 16px; font-size: 16px; }
+.proof-address { display: block; margin-top: 8px; font-size: 11px; overflow-wrap: anywhere; }
+.proof-method { padding: 28px 0 36px; border-top: 1px solid #ced7ce; }
+.proof-method summary { cursor: pointer; font-size: 14px; padding-top: 18px; text-decoration: underline; text-underline-offset: 4px; }
+.proof-method details p { max-width: 90ch; }
+.proof-empty { padding: 40px 24px; background: #fbfcfa; border-block: 1px solid #dce2dc; }
+.proof-empty h3 { font-size: 18px; margin-bottom: 8px; }
+.proof-empty p { font-size: 14px; color: #526459; }
+.proof-notice { background: #f6edcf; color: #594c1f; padding: 16px; font-size: 14px; line-height: 1.6; margin: 16px 0; }
+.proof-notice button { text-decoration: underline; margin-left: 8px; }
+.proof-footer { display: flex; align-items: center; gap: 24px; border-top: 1px solid #ced7ce; padding-top: 24px; }
+.proof-footer img { width: 110px; height: 76px; object-fit: cover; }
+.proof-footer p { font-size: 12px; color: #526459; margin-top: 8px; }
+.proof-footer > a { margin-left: auto; font-size: 14px; }
+.proof-spin { animation: proof-spin 1s linear infinite; }
+@keyframes proof-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .proof-spin { animation: none; } }
+@media (max-width: 760px) {
+  .proof-shell { padding-inline: 20px; }
+  .proof-intro { align-items: flex-start; flex-direction: column; padding-top: 28px; }
+  .proof-intro h1 { font-size: 32px; }
+  .proof-header { min-height: 84px; }
+  .proof-page nav { gap: 12px; }
+  .proof-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .proof-metrics > div { border-bottom: 1px solid #dce2dc; padding: 20px 16px; }
+  .proof-metrics > div:nth-child(even) { border-right: 0; }
+  .proof-metrics > div:last-child { grid-column: 1 / -1; border-bottom: 0; }
+  .proof-details { grid-template-columns: 1fr; gap: 28px; }
+  .proof-footer { flex-wrap: wrap; }
+  .proof-footer > a { margin-left: 0; }
+  .proof-section-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .proof-page table, .proof-page tbody { display: block; }
+  .proof-page thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .proof-page tbody tr { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 18px; border-bottom: 1px solid #dce2dc; }
+  .proof-page td { padding: 0; border: 0; white-space: normal; }
+  .proof-page td:nth-child(1), .proof-page td:nth-child(5) { grid-column: 1 / -1; }
+  .proof-page td:nth-child(2) { display: none; }
+  .proof-page td:nth-child(3)::after { content: " USDC"; font-weight: 400; }
+  .proof-page td:nth-child(4) { text-align: right; }
+}

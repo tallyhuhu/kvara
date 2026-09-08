@@ -5,8 +5,16 @@ import { lazy, Suspense, useEffect, useState } from "react";
 const KvaraChatWorkspace = lazy(() => import("./components/KvaraChatWorkspace").then((module) => ({
   default: module.KvaraChatWorkspace
 })));
+const ProofPage = lazy(() => import("./components/ProofPage").then((module) => ({ default: module.ProofPage })));
 
 export default function App() {
+  if (window.location.pathname.replace(/\/$/, "") === "/proof") {
+    return <WorkspaceFallback><ProofPage /></WorkspaceFallback>;
+  }
+  return <RentApp />;
+}
+
+function RentApp() {
   const [view, setView] = useState<"landing" | "app">(() =>
     window.location.hash === "#app" ? "app" : "landing"
   );

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import type { ProofSnapshot } from "./proof.js";
 import { config } from "./config.js";
 import type { AgentEvent, AuthChallenge, PaymentRecord, RentCycle, RentCycleStatus, RentGroup } from "./types.js";
 
@@ -76,6 +77,30 @@ export async function initStore(): Promise<void> {
 
 export function storeMode(): "postgres" | "memory" {
   return pool ? "postgres" : "memory";
+}
+
+// Explicit projection: never return household payloads, names or permission credentials.
+export async function loadProofSnapshot(): Promise<ProofSnapshot> {
+  if (!pool) {
+    const records = Array.from(memory.payments.values()).filter((p) => p.status === "confirmed");
+    return { households: memory.groups.size, candidates: records.length,
+      payments: records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 1000).map((p) => ({
+        txHash: p.txHash ?? "", wallet: p.walletAddress, amount: p.amount,
+        recipient: memory.groups.get(p.groupId)?.landlordAddress ?? ""
+      })) };
+  }
+  const result = await pool.query<{ snapshot: ProofSnapshot }>(`
+    select jsonb_build_object(
+      'households', (select count(*) from rent_groups),
+      'candidates', (select count(*) from payment_records where payload->>'status' = 'confirmed'),
+      'payments', coalesce((select jsonb_agg(jsonb_build_object(
+        'txHash', p.payload->>'txHash', 'wallet', p.payload->>'walletAddress',
+        'amount', p.payload->>'amount', 'recipient', g.payload->>'landlordAddress'
+      )) from (select group_id, payload from payment_records where payload->>'status' = 'confirmed'
+        order by updated_at desc, id limit 1000) p left join rent_groups g on g.id = p.group_id), '[]'::jsonb)
+    ) as snapshot
+  `);
+  return result.rows[0].snapshot;
 }
 
 export async function listGroups(walletAddress?: string): Promise<RentGroup[]> {

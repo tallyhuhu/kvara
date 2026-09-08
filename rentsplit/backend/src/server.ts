@@ -17,6 +17,7 @@ import { getAgentState, runAgentNow, scheduleGroup, startScheduler } from "./sch
 import { closeGroup, createGroup, getGroup, GroupChangedError, initStore, listGroups, listPayments, saveGroupIfUnchanged, storeMode } from "./store.js";
 import type { PermissionGrant, RentGroup } from "./types.js";
 import { runVeniceAgent, VeniceError } from "./veniceAgent.js";
+import { getPublicProof } from "./proof.js";
 
 const walletSchema = z.string().refine(isAddress, "A valid EVM wallet address is required.");
 const roommateSchema = z.object({
@@ -98,6 +99,18 @@ app.post("/api/auth/verify", authLimiter, asyncRoute(async (req, res) => {
   const input = z.object({ challengeId: z.string().uuid(), walletAddress: walletSchema,
     message: z.string().min(1).max(2_000), signature: z.string().regex(/^0x[0-9a-fA-F]+$/) }).parse(req.body);
   res.json(await verifyAuthChallenge(input as Parameters<typeof verifyAuthChallenge>[0]));
+}));
+
+app.get("/api/public/proof", asyncRoute(async (_req, res) => {
+  try {
+    const proof = await getPublicProof();
+    res.setHeader("Cache-Control", "public, max-age=30");
+    res.json(proof);
+  } catch (cause) {
+    logError("proof.refresh.failed", cause);
+    res.setHeader("Cache-Control", "no-store");
+    res.status(503).json({ error: "Live proof is temporarily unavailable. Please try again shortly." });
+  }
 }));
 
 app.use("/api", requireAuth);

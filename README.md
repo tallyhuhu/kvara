@@ -18,6 +18,8 @@ Base is the settlement rail rather than an optional network:
 
 ## Product Flow
 
+Public verification: [`/proof`](https://kvara-theta.vercel.app/proof) provides ledger-backed Base payment evidence after deployment. See [metric definitions, coverage and deployment notes](rentsplit/PUBLIC_PROOF.md). Real mainnet testing is included and is not presented as paying-customer traction.
+
 1. Every new wallet creates a one-time `Resident`, `Landlord`, or combined profile on Base. The wallet sends this useful onchain action itself with Kvara's Builder Code, preserving per-wallet attribution.
 2. The household admin signs in with a wallet and creates a home with landlord, residents, rent shares, and schedule.
 3. Each resident opens an invite and grants a bounded `erc20-token-periodic` permission through MetaMask Smart Accounts Kit.

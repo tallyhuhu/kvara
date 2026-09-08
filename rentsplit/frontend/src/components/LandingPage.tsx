@@ -71,6 +71,8 @@ export function LandingPage({ onEnterApp }: Props) {
             <Building2 size={16} />
             Kvara
           </div>
+          <div className="pointer-events-auto flex items-center gap-3">
+          <a href="/proof" className="inline-flex h-10 items-center gap-2 px-3 text-sm font-semibold text-white hover:underline">Live proof <ArrowUpRight size={15} /></a>
           <button
             type="button"
             onClick={onEnterApp}
@@ -79,6 +81,7 @@ export function LandingPage({ onEnterApp }: Props) {
             Open app
             <ArrowUpRight size={15} />
           </button>
+          </div>
         </div>
       </header>
 
