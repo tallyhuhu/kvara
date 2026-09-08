@@ -35,7 +35,7 @@
 .proof-page :is(th, td) { padding: 16px; border-bottom: 1px solid #dce2dc; white-space: nowrap; }
 .proof-amount { font-variant-numeric: tabular-nums; font-weight: 600; }
 .proof-confirmed { color: #256643; }
-.proof-details { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; margin-top: 44px; padding-block: 32px; border-top: 1px solid #ced7ce; }
+.proof-details { margin-top: 44px; padding-block: 32px; border-top: 1px solid #ced7ce; }
 .proof-details p, .proof-method p { font-size: 14px; line-height: 1.8; color: #526459; margin-top: 14px; max-width: 70ch; }
 .proof-details a { margin-top: 16px; font-size: 13px; text-decoration: underline; text-underline-offset: 4px; }
 .proof-code { display: inline-block; margin-top: 16px; font-size: 16px; }

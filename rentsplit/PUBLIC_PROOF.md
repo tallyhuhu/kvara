@@ -25,7 +25,7 @@ The recent table contains at most 12 verified transfer events: block timestamp (
 
 The sole fixed public address is native Base USDC, `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`. All displayed payment hashes come from verification, not sample constants. No executor key derivation or permission payload is needed by proof. No fake rent contract is introduced.
 
-`BASE_BUILDER_CODE` is displayed only if the existing attribution helper considers it configured. Configuration does not attest that every historical transaction carries ERC-8021 attribution. No start date is invented, and no Base Dashboard numbers are scraped/imported. Legacy 1Shot attribution is not claimed. Profile/user totals and currently active permission totals are intentionally omitted: invitation records and stored grants cannot reliably establish them.
+`BASE_BUILDER_CODE` remains in the API only if the existing attribution helper considers it configured; it is not displayed on the user-facing page. Configuration does not attest that every historical transaction carries ERC-8021 attribution. No start date is invented, and no Base Dashboard numbers are scraped/imported. Legacy 1Shot attribution is not claimed. Profile/user totals and currently active permission totals are intentionally omitted: invitation records and stored grants cannot reliably establish them. Detailed methodology lives in this document; the page retains brief coverage and real-testing disclosures alongside the metrics.
 
 ## Privacy and availability
 

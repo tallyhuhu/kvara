@@ -73,17 +73,9 @@ export function ProofPage() {
               </tbody></table></div>}
           </section>
           <section className="proof-details">
-            <div><h2>Builder attribution</h2><p>{proof.attribution.status === "configured" ? "Base Builder Code / ERC-8021 is configured for supported Kvara execution paths." : "A valid Builder Code is not configured on this backend."}</p>
-              {proof.attribution.code && <code className="proof-code">{proof.attribution.code}</code>}
-              <p>Configuration is not proof of attribution for every historical transaction. Base Dashboard counts are not imported here.</p></div>
             <div><h2>Direct settlement</h2><p>Native USDC on Base Mainnet. Residents grant bounded spending permissions; the agent executes payments through account abstraction.</p><p>Rent moves from each resident to the landlord, without a Kvara rent pool. There is no custom rent contract.</p>
               <a href={`https://basescan.org/address/${proof.addresses.usdc}`} target="_blank" rel="noopener noreferrer">Base USDC contract <ArrowUpRight size={14} /></a>
               <code className="proof-address">{proof.addresses.usdc}</code></div>
-          </section>
-          <section className="proof-method">
-            <h2>What these numbers mean</h2>
-            <p>This is early product activity, including real mainnet testing. Wallets are not necessarily different people or customers.</p>
-            <details><summary>Sources, counting and limitations</summary><p>Households: all rows in the current Kvara database, including closed leases and testing. These are product records, not onchain attestations.</p><p>Payments: only records marked confirmed, matched to a successful finalized Base receipt and a native USDC Transfer event with the recorded sender, landlord and exact amount. Each transaction hash + log index is counted once. Volume is summed in six-decimal USDC units, without floating-point arithmetic.</p><p>Paying wallets and payment transactions are distinct addresses and hashes within those verified transfers. Profile registrations, invitations, login sessions, gas costs and unverified records are excluded. Missing or changed landlord records can reduce coverage. Payment totals are not a complete chain index.</p><p>The endpoint checks up to 1,000 recent confirmed ledger records and caches successful results for 60 seconds. Finalization may delay newly confirmed transactions. An RPC failure is shown as unavailable, never as zero activity.</p><p>No names, apartment addresses, login data or permission credentials are published. Basescan links expose only already-public transaction evidence. This page does not assert a historical Builder attribution start date.</p></details>
           </section>
         </>}
         <footer className="proof-footer"><img src={propertyHero} alt="" /><div><a className="proof-brand" href="/">Kvara<span>.</span></a><p>A little less to think about.</p></div><a href="/#app">Open your rent desk <ArrowUpRight size={16} /></a></footer>
