@@ -16,7 +16,7 @@ import { logError, logInfo } from "./logger.js";
 import { getAgentState, runAgentNow, scheduleGroup, startScheduler } from "./scheduler.js";
 import { closeGroup, createGroup, getGroup, GroupChangedError, initStore, listGroups, listPayments, saveGroupIfUnchanged, storeMode } from "./store.js";
 import type { PermissionGrant, RentGroup } from "./types.js";
-import { runVeniceAgent } from "./veniceAgent.js";
+import { runVeniceAgent, VeniceError } from "./veniceAgent.js";
 
 const walletSchema = z.string().refine(isAddress, "A valid EVM wallet address is required.");
 const roommateSchema = z.object({
@@ -204,6 +204,7 @@ app.post("/api/venice/chat", agentLimiter, asyncRoute(async (req, res) => {
 }));
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (error instanceof VeniceError) return void res.status(error.status).json({ error: error.message });
   if (error instanceof z.ZodError) return void res.status(400).json({ error: error.issues[0]?.message ?? "Invalid request." });
   if (error instanceof HttpError) return void res.status(error.status).json({ error: error.message });
   if (error instanceof AuthError) return void res.status(401).json({ error: error.message });
